@@ -1,0 +1,71 @@
+name: CI / Release
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Cache the compiled dependency tree (OpenSSL, curl, Crow, nlohmann/json).
+      # Keyed on CMakeLists.txt so any version bump busts the cache automatically.
+      - name: Cache built dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            build/deps-prefix
+            build/openssl_ext-prefix
+            build/curl_ext-prefix
+            build/_deps
+          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build -j$(nproc)
+
+      - name: Strip binary
+        run: strip build/share2me
+
+      # Always upload the binary as a workflow artifact (useful for CI checks
+      # even on non-tag pushes — you can download it from the Actions tab).
+      - name: Upload binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: share2me-linux-x86_64
+          path: build/share2me
+          retention-days: 14
+
+  release:
+    needs: build
+    # Only run when a v* tag was pushed (e.g. v1.2.0)
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: write   # needed to create a GitHub Release
+
+    steps:
+      - name: Download binary from build job
+        uses: actions/download-artifact@v4
+        with:
+          name: share2me-linux-x86_64
+
+      # Rename to include the version tag so the asset name on the release page
+      # is descriptive (e.g. share2me-v1.2.0-linux-x86_64).
+      - name: Rename binary
+        run: mv share2me share2me-${{ github.ref_name }}-linux-x86_64
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: share2me-${{ github.ref_name }}-linux-x86_64
+          generate_release_notes: true   # auto-fills release notes from commits
