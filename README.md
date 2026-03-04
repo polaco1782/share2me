@@ -104,6 +104,22 @@ Drop the `-k` flag if you're using a trusted certificate (Let's Encrypt or your 
 
 Every upload gets a unique, short link — for example `https://yourhost:8443/a1b2c3d4e5`. Anyone with the link can download the file. There are no passwords and no accounts. Keep the link private if you want the file to stay private.
 
+## Privacy & security
+
+**Nobody can browse your files.** There is no file listing, no index page, and no way to discover what has been uploaded. The only way to reach a file is to know its exact link.
+
+Each link contains a randomly generated token (e.g. `a1b2c3d4e5`). There are over a trillion possible tokens, so guessing one is not a realistic attack. If you keep the link to yourself, the file is effectively private.
+
+A few additional layers back this up:
+
+- **HTTPS only** — all traffic is encrypted. The plain-HTTP server exists solely to redirect browsers to HTTPS; it never serves files.
+- **No enumeration** — every request that doesn't match a valid, known token gets a `403 Forbidden` response. There is no way to probe the server to find out what files exist.
+- **Integrity verification** — a SHA-256 checksum is stored at upload time and re-checked on every download. If a file is tampered with on disk, the download is refused.
+- **Self-destructing links** — single-use links delete the file the instant it is downloaded. Expiring links are removed automatically once their time is up, even if nobody ever downloads them.
+- **Optional sandbox** — when started with `--sandbox`, the process is locked inside a chroot jail and (with `--user`) drops to a low-privilege system account, so a hypothetical server compromise cannot reach the rest of the filesystem.
+
+The short version: share the link only with the people you trust, and the file is only accessible to them.
+
 ## TLS certificates
 
 On the very first run, if no certificate files are found, Share2Me generates a self-signed certificate automatically. It covers the configured domain, `localhost`, and `127.0.0.1`, and is valid for 10 years. You'll get a browser warning the first time because the certificate is self-signed — that's expected. You can dismiss it or, for a trusted certificate, use Let's Encrypt via `--acme`.
