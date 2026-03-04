@@ -14,6 +14,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Install system dependencies
+        run: sudo apt-get install -y --no-install-recommends libasio-dev
+
       # Cache the compiled dependency tree (OpenSSL, curl, Crow, nlohmann/json).
       # Keyed on CMakeLists.txt so any version bump busts the cache automatically.
       - name: Cache built dependencies
