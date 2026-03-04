@@ -15,7 +15,18 @@ Everything runs over HTTPS. A TLS certificate is generated automatically on the 
 - **Your own domain with a real certificate** — point Share2Me at your domain and let it get a free Let's Encrypt certificate automatically.
 - **HTTP → HTTPS redirect** — anyone who visits the plain HTTP address is silently redirected to HTTPS.
 
-## Building
+## Getting a pre-built binary
+
+Every release has a ready-to-run Linux binary attached — no compiler needed. Go to the [Releases page](../../releases/latest), download `share2me-<version>-linux-x86_64`, make it executable, and run it:
+
+```bash
+chmod +x share2me-v1.0.0-linux-x86_64
+./share2me-v1.0.0-linux-x86_64
+```
+
+The binary is statically linked and has no runtime dependencies.
+
+## Building from source
 
 You need CMake (≥ 3.20) and a C++20 compiler. Everything else is downloaded automatically during the build.
 
@@ -27,6 +38,19 @@ cmake --build build -j$(nproc)
 The result is a single binary at `build/share2me`. Copy it anywhere you like.
 
 > **Let's Encrypt support** is compiled in automatically if `libcurl` is available at build time. The final binary has no dependency on `libcurl` — it's only needed on the machine where you compile. Without it the server works fine with a self-signed or manually supplied certificate.
+
+## Releases & CI
+
+Every push to `master` automatically builds the project on GitHub Actions to verify nothing is broken. When a version tag is pushed, a GitHub Release is created with the binary attached.
+
+To publish a new release:
+
+```bash
+git tag v1.2.0
+git push origin v1.2.0
+```
+
+GitHub Actions will build, strip, and attach the binary to the release automatically. Release notes are generated from the commits since the previous tag.
 
 ## Running
 
