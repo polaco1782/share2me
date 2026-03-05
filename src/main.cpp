@@ -69,12 +69,21 @@ int main(int argc, char* argv[]) {
     CROW_CATCHALL_ROUTE(http_app)
     ([&](const crow::request& req) {
         static const std::string CHALLENGE_PREFIX = "/.well-known/acme-challenge/";
-        if (req.url.compare(0, CHALLENGE_PREFIX.size(), CHALLENGE_PREFIX) == 0) {
-            std::string token = req.url.substr(CHALLENGE_PREFIX.size());
-            std::lock_guard lock(acme_mutex);
-            if (auto it = acme_challenges.find(token); it != acme_challenges.end())
-                return crow::response(200, it->second);
+        static const std::string WELL_KNOWN_PREFIX = "/.well-known/";
+
+        // Only serve active ACME challenge tokens; everything else under
+        // /.well-known/ (including stale/fake tokens and security.txt probes)
+        // gets a silent 404 — no redirect, no info leakage.
+        if (req.url.compare(0, WELL_KNOWN_PREFIX.size(), WELL_KNOWN_PREFIX) == 0) {
+            if (req.url.compare(0, CHALLENGE_PREFIX.size(), CHALLENGE_PREFIX) == 0) {
+                std::string token = req.url.substr(CHALLENGE_PREFIX.size());
+                std::lock_guard lock(acme_mutex);
+                if (auto it = acme_challenges.find(token); it != acme_challenges.end())
+                    return crow::response(200, it->second);
+            }
+            return crow::response(404);
         }
+
         std::string host = req.get_header_value("Host");
         if (auto p = host.find(':'); p != std::string::npos)
             host = host.substr(0, p);

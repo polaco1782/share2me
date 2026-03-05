@@ -212,7 +212,13 @@ inline void register_routes(crow::SimpleApp& app) {
     });
 
     CROW_CATCHALL_ROUTE(app)
-    ([]() {
+    ([](const crow::request& req) {
+        // /.well-known/* probes (security.txt, acme-challenge, etc.) get a
+        // silent 404 — there is nothing here and we don't want to confirm
+        // the presence of an access-controlled resource with a 403.
+        static const std::string WELL_KNOWN_PREFIX = "/.well-known/";
+        if (req.url.compare(0, WELL_KNOWN_PREFIX.size(), WELL_KNOWN_PREFIX) == 0)
+            return crow::response(404);
         return crow::response(403, "Forbidden");
     });
 }
