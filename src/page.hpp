@@ -1,4 +1,3 @@
-// page.hpp – Embedded web UI (keeps main.cpp free of large string literals)
 #pragma once
 
 static constexpr const char* INDEX_HTML = R"html(

@@ -1,11 +1,7 @@
-// Share2Me – lightweight file sharing server
-
 #include "routes.hpp"
 #include "sandbox.hpp"
 #include "ssl_manager.hpp"
-#ifdef HAVE_ACME_CLIENT
-#  include "acme_client.hpp"
-#endif
+#include "acme_client.hpp"
 
 #include <crow.h>
 
@@ -108,41 +104,39 @@ int main(int argc, char* argv[]) {
     }
 
     if (use_acme) {
-#ifdef HAVE_ACME_CLIENT
         if (acme_email.empty())
             throw std::runtime_error("--email is required with --acme");
         if (http_port == 0)
             throw std::runtime_error(
                 "--acme requires an HTTP port (--http-port must be > 0)");
 
-        CROW_LOG_INFO << "Requesting Let's Encrypt certificate for domain: " << domain
-                      << (acme_staging ? " [staging]" : " [production]");
-        try {
-            acme::AcmeClient client("acme_work/", acme_staging, acme_verbose);
-            client.request_certificate(
-                domain, acme_email,
-                fs::path(cert_path), fs::path(key_path),
-                [&](const std::string& token, const std::string& key_auth) {
-                    std::lock_guard lock(acme_mutex);
-                    acme_challenges[token] = key_auth;
-                    CROW_LOG_INFO << "ACME: challenge token registered: " << token;
-                },
-                [&](const std::string& token) {
-                    std::lock_guard lock(acme_mutex);
-                    acme_challenges.erase(token);
-                });
-            CROW_LOG_INFO << "Let's Encrypt certificate obtained successfully";
-        } catch (const std::exception& ex) {
-            CROW_LOG_ERROR << "ACME failed: " << ex.what();
-            CROW_LOG_WARNING << "Falling back to self-signed certificate";
-            ssl_mgr::ensure_certificates(cert_path, key_path, domain);
+        if (!ssl_mgr::needs_renewal(cert_path, 3)) {
+            CROW_LOG_INFO << "Existing certificate is still valid (>3 days remaining)"
+                             " - skipping ACME renewal";
+        } else {
+            CROW_LOG_INFO << "Requesting Let's Encrypt certificate for domain: " << domain
+                          << (acme_staging ? " [staging]" : " [production]");
+            try {
+                acme::AcmeClient client("acme_work/", acme_staging, acme_verbose);
+                client.request_certificate(
+                    domain, acme_email,
+                    fs::path(cert_path), fs::path(key_path),
+                    [&](const std::string& token, const std::string& key_auth) {
+                        std::lock_guard lock(acme_mutex);
+                        acme_challenges[token] = key_auth;
+                        CROW_LOG_INFO << "ACME: challenge token registered: " << token;
+                    },
+                    [&](const std::string& token) {
+                        std::lock_guard lock(acme_mutex);
+                        acme_challenges.erase(token);
+                    });
+                CROW_LOG_INFO << "Let's Encrypt certificate obtained successfully";
+            } catch (const std::exception& ex) {
+                CROW_LOG_ERROR << "ACME failed: " << ex.what();
+                CROW_LOG_WARNING << "Falling back to self-signed certificate";
+                ssl_mgr::ensure_certificates(cert_path, key_path, domain);
+            }
         }
-#else
-        CROW_LOG_WARNING << "--acme flag given but ACME support was not compiled in "
-                            "(libcurl was not found at build time). "
-                            "Falling back to self-signed certificate.";
-        ssl_mgr::ensure_certificates(cert_path, key_path, domain);
-#endif
     } else {
         bool fresh = ssl_mgr::ensure_certificates(cert_path, key_path, domain);
         if (fresh) {
@@ -151,7 +145,7 @@ int main(int argc, char* argv[]) {
             CROW_LOG_INFO << "  cert -> " << cert_path;
             CROW_LOG_INFO << "  key  -> " << key_path;
         } else if (ssl_mgr::needs_renewal(cert_path, 30)) {
-            CROW_LOG_WARNING << "TLS certificate expires in < 30 days – consider renewal";
+            CROW_LOG_WARNING << "TLS certificate expires in < 30 days - consider renewal";
         }
     }
 

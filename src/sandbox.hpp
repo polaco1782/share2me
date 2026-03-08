@@ -1,5 +1,4 @@
 #pragma once
-// Linux process sandbox: chroot(2) jail + permanent privilege drop.
 
 #include <cerrno>
 #include <cstring>
@@ -85,7 +84,7 @@ inline void drop_privileges(const UserInfo& user) {
     // Sanity check: after a successful drop, setuid(0) must fail.
     if (::setuid(0) == 0)
         throw std::runtime_error(
-            "sandbox: privilege drop verification failed – "
+            "sandbox: privilege drop verification failed - "
             "process can still re-acquire UID 0");
 #else
     (void)user;

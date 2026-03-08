@@ -32,13 +32,13 @@ endif()
 # ---------------------------------------------------------------------------
 set(DEPS_PREFIX "${CMAKE_BINARY_DIR}/deps-prefix")
 
-# Create the include dir now – CMake validates INTERFACE_INCLUDE_DIRECTORIES
+# Create the include dir now - CMake validates INTERFACE_INCLUDE_DIRECTORIES
 # on IMPORTED targets at configure time, before ExternalProject has run.
 file(MAKE_DIRECTORY "${DEPS_PREFIX}/include")
 file(MAKE_DIRECTORY "${DEPS_PREFIX}/lib")
 
 # ===========================================================================
-# OpenSSL 3.4.1  –  static, minimal feature set
+# OpenSSL 3.4.1  -  static, minimal feature set
 #
 # Built with OpenSSL's own perl Configure script.
 # URL_HASH lines are commented out; uncomment and fill in the SHA-256 of the
@@ -69,7 +69,7 @@ ExternalProject_Add(openssl_ext
             AR=${CMAKE_AR}
             RANLIB=${CMAKE_RANLIB}
         <SOURCE_DIR>/Configure
-            no-shared       # static libs only – no libssl.so / libcrypto.so
+            no-shared       # static libs only - no libssl.so / libcrypto.so
             no-tests        # skip the test suite
             no-apps         # skip the openssl(1) CLI binary
             no-docs         # skip man-page generation
@@ -95,7 +95,7 @@ ExternalProject_Add(openssl_ext
     LOG_INSTALL     ON
 )
 
-# IMPORTED targets – paths are known once install_sw has run at build time.
+# IMPORTED targets - paths are known once install_sw has run at build time.
 add_library(OpenSSL::Crypto STATIC IMPORTED GLOBAL)
 set_target_properties(OpenSSL::Crypto PROPERTIES
     IMPORTED_LOCATION             "${DEPS_PREFIX}/lib/libcrypto.a"
@@ -113,7 +113,7 @@ set_target_properties(OpenSSL::SSL PROPERTIES
 add_dependencies(OpenSSL::SSL openssl_ext)
 
 # ===========================================================================
-# curl 8.12.1  –  static, HTTPS-only, backed by the OpenSSL we just built
+# curl 8.12.1  -  static, HTTPS-only, backed by the OpenSSL we just built
 #
 # URL_HASH line is commented out; fill in for reproducible builds:
 #   sha256sum curl-8.12.1.tar.gz
@@ -131,7 +131,7 @@ ExternalProject_Add(curl_ext
     # FindOpenSSL.cmake calls pkg_check_modules with --static, which reads
     # Libs.private from the first openssl.pc it finds.  The *system*
     # libcrypto.pc has "-lz" there (even on a no-zlib OpenSSL build on Fedora),
-    # causing FindOpenSSL to inject ZLIB::ZLIB into OpenSSL's link interface –
+    # causing FindOpenSSL to inject ZLIB::ZLIB into OpenSSL's link interface -
     # a target that doesn't exist in curl's fresh sub-build.  Our custom
     # libcrypto.pc (built with no-comp) has no "-lz", so routing pkg-config
     # to our prefix first avoids that spurious ZLIB dependency.
@@ -144,7 +144,7 @@ ExternalProject_Add(curl_ext
             -DCMAKE_INSTALL_PREFIX=${DEPS_PREFIX}
             -DCMAKE_INSTALL_LIBDIR=lib
             -DCMAKE_BUILD_TYPE=Release
-            # Static only – no libcurl.so
+            # Static only - no libcurl.so
             -DBUILD_SHARED_LIBS=OFF
             # Skip curl CLI and tests
             -DBUILD_CURL_EXE=OFF
@@ -163,7 +163,7 @@ ExternalProject_Add(curl_ext
             -DCURL_USE_LIBPSL=OFF
             -DCURL_USE_LIBSSH2=OFF
             -DCMAKE_DISABLE_FIND_PACKAGE_ZLIB=ON
-            # Disable content-encoding libs (brotli, zstd) – share2me doesn't
+            # Disable content-encoding libs (brotli, zstd) - share2me doesn't
             # need response decompression and these aren't available statically.
             -DCMAKE_DISABLE_FIND_PACKAGE_Brotli=ON
             -DCMAKE_DISABLE_FIND_PACKAGE_Zstd=ON
@@ -213,7 +213,7 @@ add_dependencies(CURL::libcurl curl_ext)
 # when "ssl" is in CROW_FEATURES.  Our OpenSSL ExternalProject only runs at
 # *build* time, so the headers / libs don't exist yet during
 # FetchContent_MakeAvailable.  We apply CROW_ENABLE_SSL and link OpenSSL
-# directly to our target below – achieving the same effect without triggering
+# directly to our target below - achieving the same effect without triggering
 # Crow's configure-time OpenSSL lookup.
 # ===========================================================================
 
@@ -243,7 +243,6 @@ add_executable(share2me src/main.cpp)
 target_compile_definitions(share2me
     PRIVATE
         CROW_ENABLE_SSL     # activate Crow/Asio TLS code paths
-        HAVE_ACME_CLIENT    # activate the Let's Encrypt ACME client
 )
 
 target_link_libraries(share2me
@@ -295,7 +294,7 @@ if(UNIX AND NOT APPLE)
             target_link_options(share2me PRIVATE -static-libgcc -static-libstdc++)
             message(STATUS "Static libgcc/libstdc++ enabled  (glibc remains dynamic)")
         else()
-            message(STATUS "No static runtime available – linking fully dynamically")
+            message(STATUS "No static runtime available - linking fully dynamically")
         endif()
     endif()
 endif()
@@ -307,7 +306,7 @@ endif()
 #                 active the linker produces a static-PIE (glibc ≥ 2.27).
 # Full RELRO:     -Wl,-z,relro,-z,now  marks the GOT/PLT read-only after
 #                 start-up and binds all symbols eagerly (no lazy binding).
-#                 Harmless for static binaries – the kernel honours the
+#                 Harmless for static binaries - the kernel honours the
 #                 PT_GNU_RELRO segment even without ld.so.
 # FORTIFY_SOURCE: replaces unsafe libc calls with bounds-checked variants.
 #                 Level 2 requires at least -O1; Release defaults to -O3.

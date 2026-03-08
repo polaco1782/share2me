@@ -1,6 +1,3 @@
-// ssl_manager.hpp – Self-signed TLS certificate generation and management
-// Uses the OpenSSL 3.x API (EVP / X.509 v3).
-
 #pragma once
 
 #include <openssl/asn1.h>
@@ -47,14 +44,6 @@ using ExtGuard  = Guard<X509_EXTENSION, X509_EXTENSION_free>;
 
 } // namespace detail
 
-/**
- * Generate a self-signed X.509 v3 certificate + RSA-2048 private key.
- *
- * @param cert_path  PEM certificate output path.
- * @param key_path   PEM private-key output path (written with mode 0600).
- * @param cn         Common Name / primary hostname (default: "localhost").
- * @param days       Certificate validity in days (default: 3650 ≈ 10 years).
- */
 inline void generate_self_signed_cert(
     const fs::path& cert_path,
     const fs::path& key_path,
@@ -72,7 +61,7 @@ inline void generate_self_signed_cert(
     // Version 3 (value 2 = v3)
     X509_set_version(cert, 2);
 
-    // Serial number – randomised to avoid SEC_ERROR_REUSED_ISSUER_AND_SERIAL
+    // Serial number - randomised to avoid SEC_ERROR_REUSED_ISSUER_AND_SERIAL
     {
         uint64_t serial_val = 0;
         RAND_bytes(reinterpret_cast<unsigned char*>(&serial_val), sizeof(serial_val));
@@ -156,10 +145,6 @@ inline void generate_self_signed_cert(
     }
 }
 
-/**
- * Return true if the certificate at @p cert_path does not exist OR will expire
- * within @p threshold_days days.
- */
 inline bool needs_renewal(const fs::path& cert_path, int threshold_days = 30) {
     if (!fs::exists(cert_path)) return true;
 
@@ -175,12 +160,6 @@ inline bool needs_renewal(const fs::path& cert_path, int threshold_days = 30) {
     return days_left < threshold_days;
 }
 
-/**
- * Ensure @p cert_path and @p key_path both exist and are not expiring.
- * Generates a fresh self-signed pair if either is missing or about to expire.
- *
- * @returns true if a new certificate was generated.
- */
 inline bool ensure_certificates(
     const fs::path& cert_path,
     const fs::path& key_path,

@@ -1,4 +1,3 @@
-// token.hpp – Random URL token generation
 #pragma once
 
 #include <cstdint>

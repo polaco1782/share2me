@@ -1,4 +1,3 @@
-// mime.hpp – MIME type lookup by file extension
 #pragma once
 
 #include <filesystem>

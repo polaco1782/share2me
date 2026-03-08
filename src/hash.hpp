@@ -1,4 +1,3 @@
-// hash.hpp – SHA-256 helpers backed by OpenSSL EVP
 #pragma once
 
 #include <openssl/evp.h>

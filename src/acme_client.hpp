@@ -1,5 +1,4 @@
 #pragma once
-#ifdef HAVE_ACME_CLIENT
 
 #include <nlohmann/json.hpp>
 
@@ -389,7 +388,7 @@ inline std::string generate_csr(const std::string& domain, EVP_PKEY*& domain_key
 } // namespace detail
 
 // ===========================================================================
-// AcmeClient – public interface
+// AcmeClient - public interface
 // ===========================================================================
 
 /**
@@ -553,7 +552,7 @@ private:
         return resp;
     }
 
-    // Verbose log helper – writes to stderr only when verbose_ is enabled.
+    // Verbose log helper - writes to stderr only when verbose_ is enabled.
     void vlog(const std::string& msg) const {
         //if (!verbose_) return;
         fprintf(stderr, "[ACME] %s\n", msg.c_str());
@@ -691,4 +690,3 @@ private:
 };
 
 } // namespace acme
-#endif // HAVE_ACME_CLIENT

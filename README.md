@@ -41,16 +41,9 @@ The result is a single binary at `build/share2me`. Copy it anywhere you like.
 
 ## Releases & CI
 
-Every push to `master` automatically builds the project on GitHub Actions to verify nothing is broken. When a version tag is pushed, a GitHub Release is created with the binary attached.
-
-To publish a new release:
-
-```bash
-git tag v1.2.0
-git push origin v1.2.0
-```
-
 GitHub Actions will build, strip, and attach the binary to the release automatically. Release notes are generated from the commits since the previous tag.
+
+[Releases page](https://github.com/polaco1782/share2me/releases)
 
 ## Running
 

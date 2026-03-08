@@ -1,5 +1,4 @@
 #pragma once
-// Crow route registration for Share2Me.
 
 #include "hash.hpp"
 #include "mime.hpp"
@@ -107,7 +106,7 @@ inline void register_routes(crow::SimpleApp& app) {
         return r;
     });
 
-    // PUT /<filename> – curl/CLI upload.
+    // PUT /<filename> - curl/CLI upload.
     //   curl -kT <file> https://<host>:<port>/<filename>
     //   curl -kT <file> "https://<host>:<port>/<filename>?single"
     CROW_ROUTE(app, "/<string>").methods(crow::HTTPMethod::PUT)
