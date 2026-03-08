@@ -31,6 +31,7 @@ int main(int argc, char* argv[]) {
     std::string domain       = "localhost";
     bool        use_acme     = false;
     bool        acme_staging = false;
+    bool        acme_verbose = false;
     std::string acme_email;
     bool        sandbox_mode = false;
     std::string drop_user;
@@ -47,9 +48,10 @@ int main(int argc, char* argv[]) {
         else if (arg == "--cert")       cert_path    = next_arg();
         else if (arg == "--key")        key_path     = next_arg();
         else if (arg == "--domain")     domain       = next_arg();
-        else if (arg == "--acme")       use_acme     = true;
-        else if (arg == "--email")      acme_email   = next_arg();
-        else if (arg == "--staging")    acme_staging = true;
+        else if (arg == "--acme")         use_acme     = true;
+        else if (arg == "--email")        acme_email   = next_arg();
+        else if (arg == "--staging")      acme_staging = true;
+        else if (arg == "--acme-verbose") acme_verbose = true;
         else if (arg == "--sandbox")    sandbox_mode = true;
         else if (arg == "--user")       drop_user    = next_arg();
         else if (arg[0] != '-') {
@@ -64,7 +66,7 @@ int main(int argc, char* argv[]) {
     std::unordered_map<std::string, std::string> acme_challenges;
 
     crow::SimpleApp http_app;
-    http_app.loglevel(crow::LogLevel::Warning);
+    http_app.loglevel(crow::LogLevel::Info);
 
     CROW_CATCHALL_ROUTE(http_app)
     ([&](const crow::request& req) {
@@ -116,7 +118,7 @@ int main(int argc, char* argv[]) {
         CROW_LOG_INFO << "Requesting Let's Encrypt certificate for domain: " << domain
                       << (acme_staging ? " [staging]" : " [production]");
         try {
-            acme::AcmeClient client("acme_work/", acme_staging);
+            acme::AcmeClient client("acme_work/", acme_staging, acme_verbose);
             client.request_certificate(
                 domain, acme_email,
                 fs::path(cert_path), fs::path(key_path),

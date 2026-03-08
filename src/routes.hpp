@@ -42,6 +42,23 @@ inline void register_routes(crow::SimpleApp& app) {
         return res;
     });
 
+    // Health check endpoint for load balancers and uptime monitoring.
+    CROW_ROUTE(app, "/healthz")
+    ([]() {
+        return crow::response(200, "OK");
+    });
+
+    // robots.txt — inform search engines not to crawl temporary links.
+    CROW_ROUTE(app, "/robots.txt")
+    ([]() {
+        crow::response res(200);
+        res.set_header("Content-Type", "text/plain; charset=utf-8");
+        res.body = "User-agent: *\n"
+                   "Disallow: /\n"
+                   "Allow: /$\n";
+        return res;
+    });
+
     CROW_ROUTE(app, "/upload").methods(crow::HTTPMethod::POST)
     ([](const crow::request& req) {
         crow::multipart::message msg(req);
@@ -117,7 +134,7 @@ inline void register_routes(crow::SimpleApp& app) {
             return crow::response(500, result.error + "\n");
 
         CROW_LOG_INFO << "PUT upload: " << safe_name
-                      << " [sha256: " << result.sha256.substr(0, 12) << "…]"
+                      << " [sha256: " << result.sha256 << "]"
                       << " -> " << result.token
                       << (single_download ? " [single-dl]" : "");
 

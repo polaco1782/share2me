@@ -15,7 +15,11 @@
 
 #include <curl/curl.h>
 
+#include <arpa/inet.h>
+#include <netinet/in.h>
+
 #include <chrono>
+#include <cstdio>
 #include <filesystem>
 #include <fstream>
 #include <functional>
@@ -55,6 +59,14 @@ inline std::string b64url(const uint8_t* data, std::size_t len) {
 
 inline std::string b64url(const std::string& s) {
     return b64url(reinterpret_cast<const uint8_t*>(s.data()), s.size());
+}
+
+/// Returns true when @p s is a valid IPv4 or IPv6 address literal.
+inline bool is_ip_address(const std::string& s) {
+    struct in_addr  v4;
+    struct in6_addr v6;
+    return inet_pton(AF_INET,  s.c_str(), &v4) == 1 ||
+           inet_pton(AF_INET6, s.c_str(), &v6) == 1;
 }
 
 // ===========================================================================
@@ -106,7 +118,8 @@ inline HttpResponse http_request(
     const std::string&              url,
     const std::string&              method,       // "GET", "HEAD", "POST"
     const std::string&              body = {},
-    const std::vector<std::string>& extra_hdrs = {})
+    const std::vector<std::string>& extra_hdrs = {},
+    bool                            verbose = false)
 {
     CurlHandle   ch;
     CurlHeaders  ch_hdrs;
@@ -114,10 +127,25 @@ inline HttpResponse http_request(
 
     for (const auto& h : extra_hdrs) ch_hdrs.add(h);
 
-    curl_easy_setopt(ch.h, CURLOPT_URL,        url.c_str());
-    curl_easy_setopt(ch.h, CURLOPT_CUSTOMREQUEST, method.c_str());
-    curl_easy_setopt(ch.h, CURLOPT_USERAGENT,  "share2me-acme/1.0");
-    curl_easy_setopt(ch.h, CURLOPT_FOLLOWLOCATION, 0L);
+    curl_easy_setopt(ch.h, CURLOPT_URL,       url.c_str());
+    curl_easy_setopt(ch.h, CURLOPT_USERAGENT, "share2me-acme/1.0");
+    // For HEAD requests CURLOPT_NOBODY must be set so curl knows not to
+    // read a response body.  Using only CURLOPT_CUSTOMREQUEST "HEAD" sends
+    // the right verb but leaves curl trying to read a body; with a
+    // keep-alive connection the server never closes the socket and curl
+    // blocks until the timeout fires.
+    if (method == "HEAD") {
+        curl_easy_setopt(ch.h, CURLOPT_NOBODY,        1L);
+    } else {
+        curl_easy_setopt(ch.h, CURLOPT_CUSTOMREQUEST, method.c_str());
+    }
+    curl_easy_setopt(ch.h, CURLOPT_FOLLOWLOCATION, 0L);    curl_easy_setopt(ch.h, CURLOPT_CONNECTTIMEOUT, 30L);  // 30 s to establish TCP+TLS
+    curl_easy_setopt(ch.h, CURLOPT_TIMEOUT,        60L);  // 60 s total per request    if (verbose)
+
+    if(verbose) {
+        curl_easy_setopt(ch.h, CURLOPT_VERBOSE, 1L);
+        curl_easy_setopt(ch.h, CURLOPT_STDERR, stderr);
+    }
 
     if (!body.empty()) {
         curl_easy_setopt(ch.h, CURLOPT_POSTFIELDS,    body.c_str());
@@ -291,8 +319,8 @@ struct Directory {
     std::string new_order;
 };
 
-inline Directory fetch_directory(const std::string& dir_url) {
-    auto resp = http_request(dir_url, "GET", {}, {});
+inline Directory fetch_directory(const std::string& dir_url, bool verbose = false) {
+    auto resp = http_request(dir_url, "GET", {}, {}, verbose);
     if (resp.status != 200)
         throw std::runtime_error("ACME directory fetch failed: HTTP " + std::to_string(resp.status));
     auto j = json::parse(resp.body);
@@ -303,8 +331,8 @@ inline Directory fetch_directory(const std::string& dir_url) {
     };
 }
 
-inline std::string fresh_nonce(const std::string& new_nonce_url) {
-    auto resp = http_request(new_nonce_url, "HEAD", {}, {});
+inline std::string fresh_nonce(const std::string& new_nonce_url, bool verbose = false) {
+    auto resp = http_request(new_nonce_url, "HEAD", {}, {}, verbose);
     auto it   = resp.headers.find("replay-nonce");
     if (it == resp.headers.end())
         throw std::runtime_error("ACME: no Replay-Nonce in newNonce response");
@@ -327,9 +355,11 @@ inline std::string generate_csr(const std::string& domain, EVP_PKEY*& domain_key
     X509_REQ* req = X509_REQ_new();
     X509_REQ_set_version(req, 0); // v1
 
-    X509_NAME* name = X509_REQ_get_subject_name(req);
-    X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
-        reinterpret_cast<const unsigned char*>(domain.c_str()), -1, -1, 0);
+    if(!is_ip_address(domain)) {
+        X509_NAME* name = X509_REQ_get_subject_name(req);
+        X509_NAME_add_entry_by_txt(name, "CN", MBSTRING_ASC,
+            reinterpret_cast<const unsigned char*>(domain.c_str()), -1, -1, 0);
+    }
 
     X509_REQ_set_pubkey(req, domain_key_out);
 
@@ -338,7 +368,7 @@ inline std::string generate_csr(const std::string& domain, EVP_PKEY*& domain_key
     X509V3_CTX ctx;
     X509V3_set_ctx_nodb(&ctx);
     X509V3_set_ctx(&ctx, nullptr, nullptr, req, nullptr, 0);
-    std::string san_str = "DNS:" + domain;
+    std::string san_str = (is_ip_address(domain) ? "IP:" : "DNS:") + domain;
     X509_EXTENSION* san = X509V3_EXT_conf_nid(nullptr, &ctx, NID_subject_alt_name, san_str.c_str());
     if (san) sk_X509_EXTENSION_push(exts, san);
     X509_REQ_add_extensions(req, exts);
@@ -380,13 +410,14 @@ public:
      * @param work_dir  Directory used to persist the account key.
      * @param staging   Use Let's Encrypt staging (safe for testing).
      */
-    explicit AcmeClient(const fs::path& work_dir, bool staging = false)
+    explicit AcmeClient(const fs::path& work_dir, bool staging = false, bool verbose = false)
         : work_dir_(work_dir)
         , dir_url_(staging ? STAGING : PRODUCTION)
+        , verbose_(verbose)
     {
         fs::create_directories(work_dir_);
         account_key_ = detail::load_or_create_ec_key(work_dir_ / "acme_account.pem");
-        dir_          = detail::fetch_directory(dir_url_);
+        dir_          = detail::fetch_directory(dir_url_, verbose_);
     }
 
     ~AcmeClient() {
@@ -425,29 +456,40 @@ public:
         using namespace detail;
 
         // 1. Register / find account -----------------------------------------
+        vlog("1/10 registering account for " + email);
         kid_ = register_account(email);
+        vlog("     kid: " + kid_);
 
         // 2. Create order -----------------------------------------------------
+        vlog("2/10 creating order for " + domain);
         auto [order_url, order_json] = new_order(domain);
+        vlog("     order: " + order_url);
 
         // 3. Process the first authorization (HTTP-01) -------------------------
+        vlog("3/10 fetching HTTP-01 authorization");
         std::string authz_url = order_json.at("authorizations").at(0).get<std::string>();
         auto [challenge_url, token] = get_http01_challenge(authz_url);
+        vlog("     token: " + token);
 
         // Key authorization = token + "." + JWK thumbprint
         std::string key_auth = token + "." + jwk_thumbprint(account_key_);
 
         // 4. Register challenge with HTTP server --------------------------------
+        vlog("4/10 registering challenge token with local HTTP server");
         serve_challenge(token, key_auth);
 
         // 5. Trigger validation ------------------------------------------------
+        vlog("5/10 triggering ACME validation");
         trigger_challenge(challenge_url);
 
         // 6. Poll until order status is "ready" ---------------------------------
+        vlog("6/10 polling order for 'ready' status (max 60 s)...");
         poll_order_ready(order_url);
+        vlog("     order is ready");
         if (stop_challenge) stop_challenge(token);
 
         // 7. Generate domain key + CSR -----------------------------------------
+        vlog("7/10 generating domain key and CSR");
         EVP_PKEY* domain_key = nullptr;
         std::string csr_b64  = generate_csr(domain, domain_key);
 
@@ -467,25 +509,33 @@ public:
         }
 
         // 8. Finalize order ----------------------------------------------------
+        vlog("8/10 finalizing order");
         std::string finalize_url = order_json.at("finalize").get<std::string>();
         finalize_order(finalize_url, csr_b64);
 
         // 9. Poll until certificate is ready ------------------------------------
+        vlog("9/10 polling order for 'valid' status (max 120 s)...");
         std::string cert_url = poll_order_valid(order_url);
+        vlog("     cert url: " + cert_url);
 
         // 10. Download certificate chain ---------------------------------------
+        vlog("10/10 downloading certificate chain");
         download_certificate(cert_url, cert_out);
+        vlog("      certificate saved to " + cert_out.string());
     }
 
 private:
     // ---- helpers -----------------------------------------------------------
 
-    std::string nonce() { return detail::fresh_nonce(dir_.new_nonce); }
+    std::string nonce() { return detail::fresh_nonce(dir_.new_nonce, verbose_); }
 
     detail::HttpResponse post_jws(const std::string& url, const json& payload) {
+        vlog("POST-JWS -> " + url);
         std::string body = detail::make_jws(payload, url, nonce(), account_key_, kid_);
+        vlog("         signing done, sending request...");
         auto resp = detail::http_request(url, "POST", body,
-            {"Content-Type: application/jose+json"});
+            {"Content-Type: application/jose+json"}, verbose_);
+        vlog("         <- HTTP " + std::to_string(resp.status));
         // Refresh nonce from response if available
         if (auto it = resp.headers.find("replay-nonce"); it != resp.headers.end())
             ; // curl_header callback already stored it; we re-fetch per request
@@ -494,10 +544,20 @@ private:
 
     // POST-as-GET: fetch a resource authenticated with our account key
     detail::HttpResponse post_as_get(const std::string& url) {
+        vlog("POST-as-GET -> " + url);
         // In JWS POST-as-GET the payload is null (serialises to empty string "")
         std::string body = detail::make_jws(json(nullptr), url, nonce(), account_key_, kid_);
-        return detail::http_request(url, "POST", body,
-            {"Content-Type: application/jose+json"});
+        auto resp = detail::http_request(url, "POST", body,
+            {"Content-Type: application/jose+json"}, verbose_);
+        vlog("             <- HTTP " + std::to_string(resp.status));
+        return resp;
+    }
+
+    // Verbose log helper – writes to stderr only when verbose_ is enabled.
+    void vlog(const std::string& msg) const {
+        //if (!verbose_) return;
+        fprintf(stderr, "[ACME] %s\n", msg.c_str());
+        fflush(stderr);
     }
 
     std::string register_account(const std::string& email) {
@@ -517,8 +577,12 @@ private:
     }
 
     std::pair<std::string, json> new_order(const std::string& domain) {
+        const bool        is_ip   = detail::is_ip_address(domain);
+        const std::string id_type = is_ip ? "ip" : "dns";
+        const std::string profile = is_ip ? "shortlived" : "classic";
         json payload = {
-            {"identifiers", {{{"type", "dns"}, {"value", domain}}}},
+            {"identifiers", {{{"type", id_type}, {"value", domain}}}},
+            {"profile",     profile},
         };
         auto resp = post_jws(dir_.new_order, payload);
         if (resp.status != 201)
@@ -623,6 +687,7 @@ private:
     detail::Directory dir_;
     EVP_PKEY*        account_key_ = nullptr;
     std::string      kid_;          // account URL, populated after registration
+    bool             verbose_      = false;
 };
 
 } // namespace acme
