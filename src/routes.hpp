@@ -11,8 +11,10 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <mutex>
 #include <string>
 #include <system_error>
+#include <unordered_map>
 
 // Convert an expiry string like "5m", "1h", "3d", "1y" into seconds.
 // Returns 0 when the input is empty or unrecognised.
@@ -31,8 +33,51 @@ inline long long parse_expire_seconds(const std::string& s) {
     return 0;
 }
 
+// Register all routes on the plain-HTTP app:
+//   - ACME http-01 challenge responses
+//   - HTTP → HTTPS permanent redirect for everything else
+inline void register_http_routes(
+    crow::SimpleApp& http_app,
+    std::string domain,
+    uint16_t https_port,
+    std::mutex& acme_mutex,
+    std::unordered_map<std::string, std::string>& acme_challenges)
+{
+    auto* mutex_ptr      = &acme_mutex;
+    auto* challenges_ptr = &acme_challenges;
+
+    CROW_CATCHALL_ROUTE(http_app)
+    ([domain = std::move(domain), https_port, mutex_ptr, challenges_ptr]
+     (const crow::request& req) {
+        static const std::string CHALLENGE_PREFIX = "/.well-known/acme-challenge/";
+        static const std::string WELL_KNOWN_PREFIX = "/.well-known/";
+
+        if (req.url.compare(0, WELL_KNOWN_PREFIX.size(), WELL_KNOWN_PREFIX) == 0) {
+            if (req.url.compare(0, CHALLENGE_PREFIX.size(), CHALLENGE_PREFIX) == 0) {
+                std::string token = req.url.substr(CHALLENGE_PREFIX.size());
+                std::lock_guard lock(*mutex_ptr);
+                if (auto it = challenges_ptr->find(token); it != challenges_ptr->end())
+                    return crow::response(200, it->second);
+            }
+            return crow::response(404);
+        }
+
+        std::string host = req.get_header_value("Host");
+        if (auto p = host.find(':'); p != std::string::npos)
+            host = host.substr(0, p);
+        if (host.empty()) host = domain;
+        std::string location = "https://" + host;
+        if (https_port != 443) location += ":" + std::to_string(https_port);
+        location += req.url;
+        crow::response r(301);
+        r.set_header("Location", location);
+        return r;
+    });
+}
+
 inline void register_routes(crow::SimpleApp& app) {
 
+    // GET / - serve the main HTML page with the upload form and client-side JS.
     CROW_ROUTE(app, "/")
     ([]() {
         crow::response res(200);
@@ -58,6 +103,7 @@ inline void register_routes(crow::SimpleApp& app) {
         return res;
     });
 
+    // POST /upload - multipart upload from HTML form.
     CROW_ROUTE(app, "/upload").methods(crow::HTTPMethod::POST)
     ([](const crow::request& req) {
         crow::multipart::message msg(req);
@@ -83,7 +129,11 @@ inline void register_routes(crow::SimpleApp& app) {
             }
         }
 
-        auto result = store_file(file_body, file_name, single_download, expire_secs);
+        std::string safe_name = fs::path(file_name).filename().string();
+        if (safe_name.empty() || safe_name == "." || safe_name == "..")
+            return crow::response(400, "Invalid filename\n");
+
+        auto result = store_file(file_body, safe_name, single_download, expire_secs);
         if (!result.ok) {
             nlohmann::json j;
             j["ok"]    = false;
@@ -91,8 +141,8 @@ inline void register_routes(crow::SimpleApp& app) {
             return crow::response(400, j.dump());
         }
 
-        CROW_LOG_INFO << "Uploaded: " << file_name
-                      << " [sha256: " << result.sha256.substr(0, 12) << "…]"
+        CROW_LOG_INFO << "POST Upload: " << safe_name
+                      << " [sha256: " << result.sha256.substr(0, 12) << "]"
                       << " -> " << result.token
                       << (single_download ? " [single-dl]" : "")
                       << (expire_secs > 0 ? " [expires in " + std::to_string(expire_secs) + "s]" : "");
@@ -132,10 +182,11 @@ inline void register_routes(crow::SimpleApp& app) {
         if (!result.ok)
             return crow::response(500, result.error + "\n");
 
-        CROW_LOG_INFO << "PUT upload: " << safe_name
-                      << " [sha256: " << result.sha256 << "]"
+        CROW_LOG_INFO << "PUT Upload: " << safe_name
+                      << " [sha256: " << result.sha256.substr(0, 12) << "]"
                       << " -> " << result.token
-                      << (single_download ? " [single-dl]" : "");
+                      << (single_download ? " [single-dl]" : "")
+                      << (expire_secs > 0 ? " [expires in " + std::to_string(expire_secs) + "s]" : "");
 
         std::string host = req.get_header_value("Host");
         if (host.empty()) host = "localhost";
@@ -146,6 +197,7 @@ inline void register_routes(crow::SimpleApp& app) {
         return r;
     });
 
+    // GET /<token> - file download.
     CROW_ROUTE(app, "/<string>")
     ([](const std::string& token) {
         // Validate: only hex characters, exactly 10 chars
@@ -198,6 +250,9 @@ inline void register_routes(crow::SimpleApp& app) {
             }
         }
 
+        CROW_LOG_INFO << "Download: " << filename
+                      << " [sha256: " << stored_sha256.substr(0, 12) << "]"
+                      << " <- " << token;
         crow::response res(200);
 
         if (single_dl) {
@@ -227,14 +282,9 @@ inline void register_routes(crow::SimpleApp& app) {
         return res;
     });
 
+    // Catch-all route to return 404 for any other paths.
     CROW_CATCHALL_ROUTE(app)
     ([](const crow::request& req) {
-        // /.well-known/* probes (security.txt, acme-challenge, etc.) get a
-        // silent 404 — there is nothing here and we don't want to confirm
-        // the presence of an access-controlled resource with a 403.
-        static const std::string WELL_KNOWN_PREFIX = "/.well-known/";
-        if (req.url.compare(0, WELL_KNOWN_PREFIX.size(), WELL_KNOWN_PREFIX) == 0)
-            return crow::response(404);
-        return crow::response(403, "Forbidden");
+        return crow::response(404);
     });
 }

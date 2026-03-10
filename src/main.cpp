@@ -60,41 +60,12 @@ int main(int argc, char* argv[]) {
 
     std::mutex                                   acme_mutex;
     std::unordered_map<std::string, std::string> acme_challenges;
-
     crow::SimpleApp http_app;
-    http_app.loglevel(crow::LogLevel::Info);
-
-    CROW_CATCHALL_ROUTE(http_app)
-    ([&](const crow::request& req) {
-        static const std::string CHALLENGE_PREFIX = "/.well-known/acme-challenge/";
-        static const std::string WELL_KNOWN_PREFIX = "/.well-known/";
-
-        // Only serve active ACME challenge tokens; everything else under
-        // /.well-known/ (including stale/fake tokens and security.txt probes)
-        // gets a silent 404 — no redirect, no info leakage.
-        if (req.url.compare(0, WELL_KNOWN_PREFIX.size(), WELL_KNOWN_PREFIX) == 0) {
-            if (req.url.compare(0, CHALLENGE_PREFIX.size(), CHALLENGE_PREFIX) == 0) {
-                std::string token = req.url.substr(CHALLENGE_PREFIX.size());
-                std::lock_guard lock(acme_mutex);
-                if (auto it = acme_challenges.find(token); it != acme_challenges.end())
-                    return crow::response(200, it->second);
-            }
-            return crow::response(404);
-        }
-
-        std::string host = req.get_header_value("Host");
-        if (auto p = host.find(':'); p != std::string::npos)
-            host = host.substr(0, p);
-        if (host.empty()) host = domain;
-        std::string location = "https://" + host;
-        if (https_port != 443) location += ":" + std::to_string(https_port);
-        location += req.url;
-        crow::response r(301);
-        r.set_header("Location", location);
-        return r;
-    });
-
     std::thread http_thread;
+
+    http_app.loglevel(crow::LogLevel::Info);
+    register_http_routes(http_app, domain, https_port, acme_mutex, acme_challenges);
+
     if (http_port > 0) {
         http_thread = std::thread([&] {
             http_app.port(http_port).multithreaded().run();
