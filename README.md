@@ -153,6 +153,8 @@ When the **End-to-end encrypted** checkbox is ticked on the upload form, the fil
 
 ### What the server stores
 
+| Field | Value |
+|---|---|
 | File data | AES-GCM ciphertext (opaque bytes) |
 | Metadata | Token, ciphertext SHA-256, original filename, single-dl/expiry flags, `encrypted: true` |
 | Encryption key | **Never stored — exists only in the share URL** |
