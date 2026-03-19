@@ -12,6 +12,7 @@ Everything runs over HTTPS. A TLS certificate is generated automatically on the 
 - **Upload from the terminal** — use `curl` to push files directly and get the link back in one command.
 - **Single-use links** — mark a file as "single download" and it's permanently deleted the moment someone downloads it.
 - **Expiring links** — set a time limit on any upload (e.g. 5 minutes, 2 hours, 3 days). The file disappears automatically once the time is up.
+- **End-to-end encryption** — tick one checkbox to encrypt files in the browser before they leave your machine. The server only ever sees ciphertext; the key never travels over the network.
 - **Your own domain with a real certificate** — point Share2Me at your domain and let it get a free Let's Encrypt certificate automatically.
 - **HTTP → HTTPS redirect** — anyone who visits the plain HTTP address is silently redirected to HTTPS.
 
@@ -91,7 +92,8 @@ Then open `https://localhost:8443` in your browser.
 1. Open `https://<host>:<port>` in your browser.
 2. Pick a file.
 3. Optionally turn on **Single-time download** or set an **expiry time**.
-4. Click **Upload** and copy the link.
+4. Optionally tick **End-to-end encrypted 🔒 E2EE** to encrypt the file in your browser before uploading (see below).
+5. Click **Upload** and copy the link.
 
 ### From the terminal
 
@@ -121,6 +123,50 @@ Drop the `-k` flag if you're using a trusted certificate (Let's Encrypt or your 
 
 Every upload gets a unique, short link — for example `https://yourhost:8443/a1b2c3d4e5`. Anyone with the link can download the file. There are no passwords and no accounts. Keep the link private if you want the file to stay private.
 
+## End-to-end encryption (E2EE)
+
+When the **End-to-end encrypted** checkbox is ticked on the upload form, the file is encrypted entirely inside your browser using the Web Crypto API before a single byte is sent to the server.
+
+### How it works
+
+**Upload**
+
+1. The browser generates a fresh 256-bit AES-GCM key using `crypto.subtle.generateKey`.
+2. The file is split into 1 MB chunks. Each chunk is encrypted with its own random 12-byte IV:
+   ```
+   [4-byte chunk length (big-endian)] [12-byte IV] [ciphertext]
+   ```
+3. The resulting encrypted blob is uploaded to the server via the normal `POST /upload` path. The server stores opaque ciphertext — it has no access to the key or the plaintext.
+4. The raw key is base64-encoded and embedded in the **URL fragment** together with the original filename:
+   ```
+   https://yourhost/d/a1b2c3d4e5#k=<base64-key>&n=photo.jpg
+   ```
+
+**Why the fragment?** The `#fragment` part of a URL is a browser-only concept. It is never included in the HTTP request sent to the server, so the key is mathematically impossible for the server to observe.
+
+**Download**
+
+1. The recipient opens the share link. The browser fetches the ciphertext from `/a1b2c3d4e5` (server sees a normal token request).
+2. The key is read from `location.hash` — this happens entirely in JavaScript, never on the server.
+3. Each frame is decrypted in order with `crypto.subtle.decrypt`.
+4. The assembled plaintext is offered to the recipient as a browser download, named with the original filename stored in the fragment.
+
+### What the server stores
+
+| File data | AES-GCM ciphertext (opaque bytes) |
+| Metadata | Token, ciphertext SHA-256, original filename, single-dl/expiry flags, `encrypted: true` |
+| Encryption key | **Never stored — exists only in the share URL** |
+
+### Compatibility with other features
+
+- **`curl` / CLI uploads** — E2EE is a browser-only feature. `curl -T` uploads are always plaintext.
+
+### Security properties
+
+- The server operator cannot read encrypted files, even with full disk access.
+- Revocation is still possible: delete the token from `data/` and the ciphertext is gone, making the key in the URL useless.
+- Losing the share URL means losing the key — there is no recovery path.
+
 ## Privacy & security
 
 **Nobody can browse your files.** There is no file listing, no index page, and no way to discover what has been uploaded. The only way to reach a file is to know its exact link.
@@ -130,6 +176,7 @@ Each link contains a randomly generated token (e.g. `a1b2c3d4e5`). There are ove
 A few additional layers back this up:
 
 - **HTTPS only** — all traffic is encrypted. The plain-HTTP server exists solely to redirect browsers to HTTPS; it never serves files.
+- **End-to-end encryption** — when E2EE is enabled at upload time, the server only ever stores ciphertext. The key lives solely in the share URL fragment and never touches the server.
 - **No enumeration** — every request that doesn't match a valid, known token gets a `403 Forbidden` response. There is no way to probe the server to find out what files exist.
 - **Integrity verification** — a SHA-256 checksum is stored at upload time and re-checked on every download. If a file is tampered with on disk, the download is refused.
 - **Self-destructing links** — single-use links delete the file the instant it is downloaded. Expiring links are removed automatically once their time is up, even if nobody ever downloads them.
@@ -146,3 +193,7 @@ To swap the certificate at any time, just delete `cert.pem` and `key.pem` and re
 ## File storage
 
 All uploaded files are kept in a `data/` directory next to the binary. Each file gets its own metadata record that tracks the original filename, a SHA-256 checksum, and any expiry or single-download settings. The checksum is verified on every download to ensure the file hasn't been corrupted. Expired files are cleaned up automatically in the background.
+
+## License
+
+Share2Me is released under the [MIT License](LICENSE).

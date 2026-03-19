@@ -112,6 +112,7 @@ inline void register_routes(crow::SimpleApp& app) {
         std::string file_name;
         bool single_download = false;
         long long expire_secs = 0;
+        bool is_encrypted = false;
 
         for (auto& [name, part] : msg.part_map) {
             if (name == "file") {
@@ -126,6 +127,8 @@ inline void register_routes(crow::SimpleApp& app) {
                 single_download = (part.body == "1");
             } else if (name == "expire_after") {
                 expire_secs = parse_expire_seconds(part.body);
+            } else if (name == "encrypted") {
+                is_encrypted = (part.body == "1");
             }
         }
 
@@ -133,7 +136,7 @@ inline void register_routes(crow::SimpleApp& app) {
         if (safe_name.empty() || safe_name == "." || safe_name == "..")
             return crow::response(400, "Invalid filename\n");
 
-        auto result = store_file(file_body, safe_name, single_download, expire_secs);
+        auto result = store_file(file_body, safe_name, single_download, expire_secs, is_encrypted);
         if (!result.ok) {
             nlohmann::json j;
             j["ok"]    = false;
@@ -195,6 +198,19 @@ inline void register_routes(crow::SimpleApp& app) {
         r.set_header("Content-Type", "text/plain; charset=utf-8");
         r.body = "https://" + host + "/" + result.token + "\n";
         return r;
+    });
+
+    // GET /d/<token> - serve the client-side decrypt page for E2EE files.
+    // The decryption key lives only in the URL fragment and is never seen by the server.
+    CROW_ROUTE(app, "/d/<string>")
+    ([](const std::string& token) {
+        if (token.size() != 10 ||
+            token.find_first_not_of("0123456789abcdef") != std::string::npos)
+            return crow::response(404, "Not found");
+        crow::response res(200);
+        res.set_header("Content-Type", "text/html; charset=utf-8");
+        res.body = DECRYPT_PAGE_HTML;
+        return res;
     });
 
     // GET /<token> - file download.

@@ -25,7 +25,8 @@ struct UploadResult {
 inline UploadResult store_file(const std::string& body,
                                 const std::string& filename,
                                 bool single_download,
-                                long long expire_seconds = 0) {
+                                long long expire_seconds = 0,
+                                bool encrypted = false) {
     UploadResult res;
 
     if (body.empty() || filename.empty()) {
@@ -53,6 +54,7 @@ inline UploadResult store_file(const std::string& body,
     meta["filename"]        = filename;
     meta["stored_as"]       = stored_as;
     meta["single_download"] = single_download;
+    meta["encrypted"]       = encrypted;
     if (expire_seconds > 0) {
         long long now_sec = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();
