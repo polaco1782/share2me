@@ -122,14 +122,12 @@ static constexpr const char* INDEX_HTML = R"html(
   </form>
 
   <div class="result" id="result"></div>
-</div>
-<script>
   <div style="text-align:center;margin-top:12px;color:#94a3b8;font-size:.85rem">
     Copyright © 2026 Cassiano Martin
     <br>
-    <a href="https://github.com/polaco1782/share2me" style="color:var(--accent);text-decoration:none">Project on GitHub</a>
+    <a href="https://github.com/polaco1782/share2me" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">Project on GitHub</a>
   </div>
-
+</div>
 <script>
   const fileInput   = document.getElementById('fileInput');
   const fileLabel   = document.getElementById('fileLabel');
@@ -304,14 +302,12 @@ static constexpr const char* DECRYPT_PAGE_HTML = R"html(
     and was never transmitted to the server.
   </div>
   <a class="home-link" href="/">&#8592; Upload another file</a>
-</div>
-<script>
   <div style="text-align:center;margin-top:12px;color:#94a3b8;font-size:.85rem">
     Copyright © 2026 Cassiano Martin
     <br>
-    <a href="https://github.com/polaco1782/share2me" style="color:var(--accent);text-decoration:none">Project on GitHub</a>
+    <a href="https://github.com/polaco1782/share2me" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">Project on GitHub</a>
   </div>
-
+</div>
 <script>
 async function decryptAndDownload(token, keyB64, filename) {
   const statusEl = document.getElementById('status');
