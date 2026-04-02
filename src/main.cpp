@@ -1,14 +1,14 @@
+#include "config.hpp"
 #include "routes.hpp"
+#include "cert_manager.hpp"
+#include "housekeeper.hpp"
 #include "sandbox.hpp"
-#include "ssl_manager.hpp"
-#include "acme_client.hpp"
+#include "tls_util.hpp"
 
 #include <crow.h>
 
 #include <chrono>
-#include <atomic>
 #include <filesystem>
-#include <fstream>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -20,138 +20,68 @@ namespace fs = std::filesystem;
 
 int main(int argc, char* argv[]) {
 
-    uint16_t    https_port   = 8443;
-    uint16_t    http_port    = 8080;
-    std::string cert_path    = "cert.pem";
-    std::string key_path     = "key.pem";
-    std::string domain       = "localhost";
-    bool        use_acme     = false;
-    bool        acme_staging = false;
-    bool        acme_verbose = false;
-    std::string acme_email;
-    bool        sandbox_mode = false;
-    std::string drop_user;
-
-    for (int i = 1; i < argc; ++i) {
-        std::string arg = argv[i];
-        auto next_arg = [&]() -> std::string {
-            if (++i >= argc)
-                throw std::runtime_error("Missing value for " + arg);
-            return argv[i];
-        };
-        if      (arg == "--port")       https_port   = static_cast<uint16_t>(std::stoi(next_arg()));
-        else if (arg == "--http-port")  http_port    = static_cast<uint16_t>(std::stoi(next_arg()));
-        else if (arg == "--cert")       cert_path    = next_arg();
-        else if (arg == "--key")        key_path     = next_arg();
-        else if (arg == "--domain")     domain       = next_arg();
-        else if (arg == "--acme")         use_acme     = true;
-        else if (arg == "--email")        acme_email   = next_arg();
-        else if (arg == "--staging")      acme_staging = true;
-        else if (arg == "--acme-verbose") acme_verbose = true;
-        else if (arg == "--sandbox")    sandbox_mode = true;
-        else if (arg == "--user")       drop_user    = next_arg();
-        else if (arg[0] != '-') {
-            try { https_port = static_cast<uint16_t>(std::stoi(arg)); }
-            catch (...) {}
-        }
-    }
+    // ── 1. Parse command-line arguments ──────────────────────────────────
+    AppConfig cfg = parse_args(argc, argv);
 
     fs::create_directories(DATA_DIR);
 
+    // ── 2. HTTP redirect server (also serves ACME http-01 challenges) ───
     std::mutex                                   acme_mutex;
     std::unordered_map<std::string, std::string> acme_challenges;
     crow::SimpleApp http_app;
-    std::thread http_thread;
+    std::thread     http_thread;
 
     http_app.loglevel(crow::LogLevel::Info);
-    register_http_routes(http_app, domain, https_port, acme_mutex, acme_challenges);
+    register_http_routes(http_app, cfg.domain, cfg.https_port,
+                         acme_mutex, acme_challenges);
 
-    if (http_port > 0) {
+    if (cfg.http_port > 0) {
         http_thread = std::thread([&] {
-            http_app.port(http_port).multithreaded().run();
+            http_app.port(cfg.http_port).multithreaded().run();
         });
-        // Give the HTTP server a moment to bind its port before ACME starts
+        // Give the HTTP server a moment to bind before ACME starts.
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
     }
 
-    if (use_acme) {
-        if (acme_email.empty())
-            throw std::runtime_error("--email is required with --acme");
-        if (http_port == 0)
-            throw std::runtime_error(
-                "--acme requires an HTTP port (--http-port must be > 0)");
+    // ── 3. Certificate provisioning (ACME or self-signed) ────────────────
+    if (cfg.use_acme && cfg.http_port == 0)
+        throw std::runtime_error(
+            "--acme requires an HTTP port (--http-port must be > 0)");
 
-        if (!ssl_mgr::needs_renewal(cert_path, 3)) {
-            CROW_LOG_INFO << "Existing certificate is still valid (>3 days remaining)"
-                             " - skipping ACME renewal";
-        } else {
-            CROW_LOG_INFO << "Requesting Let's Encrypt certificate for domain: " << domain
-                          << (acme_staging ? " [staging]" : " [production]");
-            try {
-                acme::AcmeClient client("acme_work/", acme_staging, acme_verbose);
-                client.request_certificate(
-                    domain, acme_email,
-                    fs::path(cert_path), fs::path(key_path),
-                    [&](const std::string& token, const std::string& key_auth) {
-                        std::lock_guard lock(acme_mutex);
-                        acme_challenges[token] = key_auth;
-                        CROW_LOG_INFO << "ACME: challenge token registered: " << token;
-                    },
-                    [&](const std::string& token) {
-                        std::lock_guard lock(acme_mutex);
-                        acme_challenges.erase(token);
-                    });
-                CROW_LOG_INFO << "Let's Encrypt certificate obtained successfully";
-            } catch (const std::exception& ex) {
-                CROW_LOG_ERROR << "ACME failed: " << ex.what();
-                CROW_LOG_WARNING << "Falling back to self-signed certificate";
-                ssl_mgr::ensure_certificates(cert_path, key_path, domain);
-            }
-        }
-    } else {
-        bool fresh = ssl_mgr::ensure_certificates(cert_path, key_path, domain);
-        if (fresh) {
-            CROW_LOG_INFO << "Generated self-signed TLS certificate (CN=" << domain
-                          << ", 10 years)";
-            CROW_LOG_INFO << "  cert -> " << cert_path;
-            CROW_LOG_INFO << "  key  -> " << key_path;
-        } else if (ssl_mgr::needs_renewal(cert_path, 30)) {
-            CROW_LOG_WARNING << "TLS certificate expires in < 30 days - consider renewal";
-        }
-    }
+    cert_mgr::CertConfig cert_cfg{
+        .cert_path    = cfg.cert_path,
+        .key_path     = cfg.key_path,
+        .domain       = cfg.domain,
+        .use_acme     = cfg.use_acme,
+        .acme_email   = cfg.acme_email,
+        .acme_staging = cfg.acme_staging,
+        .acme_verbose = cfg.acme_verbose,
+    };
 
-    // Load TLS files into memory before entering the chroot jail.
-    std::string tls_cert_pem, tls_key_pem;
-    {
-        auto slurp = [](const std::string& path) {
-            std::ifstream f(path, std::ios::binary);
-            if (!f) throw std::runtime_error("Cannot open TLS file: " + path);
-            return std::string(std::istreambuf_iterator<char>(f), {});
-        };
-        tls_cert_pem = slurp(cert_path);
-        tls_key_pem  = slurp(key_path);
-        CROW_LOG_INFO << "TLS material loaded into memory (cert "
-                      << tls_cert_pem.size() << " B, key "
-                      << tls_key_pem.size()  << " B)";
-    }
+    cert_mgr::provision_certificates(cert_cfg, acme_mutex, acme_challenges);
 
-    if ((sandbox_mode || !drop_user.empty()) && ::geteuid() != 0) {
+    // ── 4. Load TLS material into memory before entering the jail ────────
+    auto tls = tls_util::load_files(cfg.cert_path, cfg.key_path);
+
+    // ── 5. Sandbox / privilege drop ──────────────────────────────────────
+    if ((cfg.sandbox_mode || !cfg.drop_user.empty()) && ::geteuid() != 0) {
         CROW_LOG_ERROR << "--sandbox / --user require root privileges "
                           "(run with sudo or grant CAP_SYS_CHROOT + CAP_SETUID)";
         return 1;
     }
 
     std::optional<sandbox::UserInfo> jail_user;
-    if (!drop_user.empty()) {
+    if (!cfg.drop_user.empty()) {
         try {
-            jail_user = sandbox::lookup_user(drop_user);
+            jail_user = sandbox::lookup_user(cfg.drop_user);
         } catch (const std::exception& ex) {
-            CROW_LOG_ERROR << "Cannot resolve --user '" << drop_user << "': " << ex.what();
+            CROW_LOG_ERROR << "Cannot resolve --user '" << cfg.drop_user
+                           << "': " << ex.what();
             return 1;
         }
     }
 
-    if (sandbox_mode) {
+    if (cfg.sandbox_mode) {
         const fs::path jail_abs = fs::absolute(DATA_DIR);
 
         try {
@@ -171,7 +101,7 @@ int main(int argc, char* argv[]) {
     if (jail_user) {
         try {
             sandbox::drop_privileges(*jail_user);
-            CROW_LOG_INFO << "Privileges dropped to " << drop_user
+            CROW_LOG_INFO << "Privileges dropped to " << cfg.drop_user
                           << " (uid=" << jail_user->uid
                           << ", gid=" << jail_user->gid << ")";
         } catch (const std::exception& ex) {
@@ -180,68 +110,32 @@ int main(int argc, char* argv[]) {
         }
     }
 
+    // ── 6. Background tasks ─────────────────────────────────────────────
+    housekeeper::start_housekeeper_thread();
+
+    if (!cfg.sandbox_mode) {
+        cert_mgr::start_renewal_thread(cert_cfg, acme_mutex, acme_challenges);
+    } else {
+        CROW_LOG_WARNING << "Cert renewal thread skipped in sandbox mode "
+                            "(cert files are outside the chroot jail)";
+    }
+
+    // ── 7. HTTPS server ─────────────────────────────────────────────────
     crow::SimpleApp app;
     app.loglevel(crow::LogLevel::Info);
-
     register_routes(app);
 
-    // Housekeeping thread: scan for expired files every minute.
-    std::atomic<bool> stop_housekeep{false};
-    std::thread housekeep_thread([&]() {
-        while (!stop_housekeep.load()) {
-            // Sleep 60 seconds but wake quickly on stop.
-            for (int i = 0; i < 60 && !stop_housekeep.load(); ++i)
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            if (stop_housekeep.load()) break;
+    auto ssl_ctx = tls_util::create_ssl_context(tls);
 
-            try {
-                long long now_sec = std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::system_clock::now().time_since_epoch()).count();
+    CROW_LOG_INFO << "Share2Me (HTTPS) listening on " << cfg.https_port
+                  << "  |  HTTP redirect on " << cfg.http_port;
+    app.port(cfg.https_port).ssl(std::move(ssl_ctx)).multithreaded().run();
 
-                for (auto& entry : fs::directory_iterator(DATA_DIR)) {
-                    if (entry.path().extension() != ".json") continue;
-                    try {
-                        nlohmann::json meta;
-                        {
-                            std::ifstream ifs(entry.path());
-                            if (!ifs) continue;
-                            ifs >> meta;
-                        }
-                        if (!meta.contains("expires_at")) continue;
-                        long long expires_at = meta["expires_at"].get<long long>();
-                        if (now_sec >= expires_at) {
-                            std::string stored_as = meta.value("stored_as", "");
-                            std::error_code ec;
-                            if (!stored_as.empty())
-                                fs::remove(DATA_DIR / stored_as, ec);
-                            fs::remove(entry.path(), ec);
-                            CROW_LOG_INFO << "Housekeep: expired file removed: "
-                                          << meta.value("id", "?");
-                        }
-                    } catch (...) {}
-                }
-            } catch (...) {}
-        }
-    });
+    // ── 8. Shutdown ─────────────────────────────────────────────────────
+    cert_mgr::stop_renewal_thread();
+    housekeeper::stop_housekeeper_thread();
 
-    asio::ssl::context ssl_ctx(asio::ssl::context::sslv23);
-    ssl_ctx.set_verify_mode(asio::ssl::verify_peer);
-    ssl_ctx.set_verify_mode(asio::ssl::verify_client_once);
-    ssl_ctx.use_certificate_chain(asio::buffer(tls_cert_pem));
-    ssl_ctx.use_private_key(asio::buffer(tls_key_pem), asio::ssl::context::pem);
-    ssl_ctx.set_options(asio::ssl::context::default_workarounds |
-                        asio::ssl::context::no_sslv2 |
-                        asio::ssl::context::no_sslv3);
-    OPENSSL_cleanse(tls_key_pem.data(), tls_key_pem.size());
-
-    CROW_LOG_INFO << "Share2Me (HTTPS) listening on " << https_port
-                  << "  |  HTTP redirect on " << http_port;
-    app.port(https_port).ssl(std::move(ssl_ctx)).multithreaded().run();
-
-    stop_housekeep = true;
-    if (housekeep_thread.joinable()) housekeep_thread.join();
-
-    if (http_port > 0) {
+    if (cfg.http_port > 0) {
         http_app.stop();
         if (http_thread.joinable()) http_thread.join();
     }
