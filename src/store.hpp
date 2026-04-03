@@ -1,6 +1,7 @@
 #pragma once
 
 #include "hash.hpp"
+#include "mime.hpp"
 
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -12,7 +13,7 @@
 namespace fs = std::filesystem;
 
 // Mutated to "/" after chroot(2) when --sandbox is active.
-inline fs::path DATA_DIR = "data";
+fs::path DATA_DIR = "data";
 
 struct UploadResult {
     bool        ok      = false;
@@ -22,7 +23,7 @@ struct UploadResult {
 };
 
 /// Generate a random 10-character lowercase hex token used as the URL identifier.
-inline std::string generate_token() {
+std::string generate_token() {
     static thread_local std::mt19937_64 rng{std::random_device{}()};
     std::uniform_int_distribution<std::uint64_t> dist;
     std::uint64_t value = dist(rng);
@@ -34,11 +35,12 @@ inline std::string generate_token() {
     return h;
 }
 
-inline UploadResult store_file(const std::string& body,
+UploadResult store_file(const std::string& body,
                                 const std::string& filename,
                                 bool single_download,
                                 long long expire_seconds = 0,
-                                bool encrypted = false) {
+                                bool encrypted = false,
+                                const std::string& content_type = "") {
     UploadResult res;
 
     if (body.empty() || filename.empty()) {
@@ -67,6 +69,7 @@ inline UploadResult store_file(const std::string& body,
     meta["stored_as"]       = stored_as;
     meta["single_download"] = single_download;
     meta["encrypted"]       = encrypted;
+    meta["content_type"]    = content_type.empty() ? mime_for(filename) : content_type;
     if (expire_seconds > 0) {
         long long now_sec = std::chrono::duration_cast<std::chrono::seconds>(
             std::chrono::system_clock::now().time_since_epoch()).count();

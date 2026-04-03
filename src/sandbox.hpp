@@ -24,7 +24,7 @@ struct UserInfo {
 
 /// Look up a user by name and return its UID/GID.
 /// Must be called *before* enter_chroot() — requires /etc/passwd.
-inline UserInfo lookup_user(const std::string& username) {
+UserInfo lookup_user(const std::string& username) {
 #ifdef __linux__
     errno = 0;
     const struct passwd* pw = ::getpwnam(username.c_str());
@@ -41,7 +41,7 @@ inline UserInfo lookup_user(const std::string& username) {
 
 /// Transfer ownership of @dir to @user so the process can write files
 /// after privilege drop.  Skipped silently if the effective UID is not root.
-inline void chown_jail(const std::filesystem::path& dir, const UserInfo& user) {
+void chown_jail(const std::filesystem::path& dir, const UserInfo& user) {
 #ifdef __linux__
     if (::geteuid() == 0 &&
         ::chown(dir.c_str(), user.uid, user.gid) != 0)
@@ -55,7 +55,7 @@ inline void chown_jail(const std::filesystem::path& dir, const UserInfo& user) {
 /// Jail the calling process into @dir via chroot(2) + chdir("/").
 /// Requires CAP_SYS_CHROOT (effective UID 0 on most Linux systems).
 /// chroot is process-wide — all threads are jailed simultaneously.
-inline void enter_chroot(const std::filesystem::path& dir) {
+void enter_chroot(const std::filesystem::path& dir) {
 #ifdef __linux__
     if (::chroot(dir.c_str()) != 0)
         throw std::system_error(errno, std::generic_category(),
@@ -73,7 +73,7 @@ inline void enter_chroot(const std::filesystem::path& dir) {
 /// Requires CAP_SETUID + CAP_SETGID (effective UID 0).
 /// Order: clear supplementary groups → setgid → setuid.
 /// Verifies that UID 0 cannot be re-acquired afterwards.
-inline void drop_privileges(const UserInfo& user) {
+void drop_privileges(const UserInfo& user) {
 #ifdef __linux__
     if (::setgroups(0, nullptr) != 0)
         throw std::system_error(errno, std::generic_category(), "setgroups");

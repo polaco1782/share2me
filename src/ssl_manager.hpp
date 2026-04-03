@@ -21,7 +21,7 @@ namespace fs = std::filesystem;
 namespace detail {
 
 /// Collect and return the latest OpenSSL error string.
-inline std::string last_error() {
+std::string last_error() {
     char buf[256] = {};
     ERR_error_string_n(ERR_get_error(), buf, sizeof(buf));
     return std::string(buf);
@@ -44,7 +44,7 @@ using ExtGuard  = Guard<X509_EXTENSION, X509_EXTENSION_free>;
 
 } // namespace detail
 
-inline void generate_self_signed_cert(
+void generate_self_signed_cert(
     const fs::path& cert_path,
     const fs::path& key_path,
     const std::string& cn = "localhost",
@@ -145,7 +145,7 @@ inline void generate_self_signed_cert(
     }
 }
 
-inline bool needs_renewal(const fs::path& cert_path, int threshold_days = 30) {
+bool needs_renewal(const fs::path& cert_path, int threshold_days = 30) {
     if (!fs::exists(cert_path)) return true;
 
     FILE* f = fopen(cert_path.string().c_str(), "r");
@@ -160,7 +160,7 @@ inline bool needs_renewal(const fs::path& cert_path, int threshold_days = 30) {
     return days_left < threshold_days;
 }
 
-inline bool ensure_certificates(
+bool ensure_certificates(
     const fs::path& cert_path,
     const fs::path& key_path,
     const std::string& cn = "localhost",

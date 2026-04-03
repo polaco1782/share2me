@@ -41,7 +41,7 @@ namespace detail {
 static const char B64URL_CHARS[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-inline std::string b64url(const uint8_t* data, std::size_t len) {
+std::string b64url(const uint8_t* data, std::size_t len) {
     std::string out;
     out.reserve(((len + 2) / 3) * 4);
     for (std::size_t i = 0; i < len; i += 3) {
@@ -56,12 +56,12 @@ inline std::string b64url(const uint8_t* data, std::size_t len) {
     return out;
 }
 
-inline std::string b64url(const std::string& s) {
+std::string b64url(const std::string& s) {
     return b64url(reinterpret_cast<const uint8_t*>(s.data()), s.size());
 }
 
 /// Returns true when @p s is a valid IPv4 or IPv6 address literal.
-inline bool is_ip_address(const std::string& s) {
+bool is_ip_address(const std::string& s) {
     struct in_addr  v4;
     struct in6_addr v6;
     return inet_pton(AF_INET,  s.c_str(), &v4) == 1 ||
@@ -77,12 +77,12 @@ struct HttpResponse {
     std::map<std::string, std::string> headers; // lowercase keys
 };
 
-inline std::size_t curl_write(char* ptr, std::size_t sz, std::size_t n, void* ud) {
+std::size_t curl_write(char* ptr, std::size_t sz, std::size_t n, void* ud) {
     static_cast<std::string*>(ud)->append(ptr, sz * n);
     return sz * n;
 }
 
-inline std::size_t curl_header(char* buf, std::size_t sz, std::size_t n, void* ud) {
+std::size_t curl_header(char* buf, std::size_t sz, std::size_t n, void* ud) {
     auto* hdrs = static_cast<std::map<std::string, std::string>*>(ud);
     std::string line(buf, sz * n);
     // strip trailing CRLF
@@ -113,7 +113,7 @@ struct CurlHeaders {
     ~CurlHeaders() { if (list) curl_slist_free_all(list); }
 };
 
-inline HttpResponse http_request(
+HttpResponse http_request(
     const std::string&              url,
     const std::string&              method,       // "GET", "HEAD", "POST"
     const std::string&              body = {},
@@ -171,7 +171,7 @@ inline HttpResponse http_request(
 // ===========================================================================
 
 /// Load or generate an EC P-256 account key stored at @p path (PEM).
-inline EVP_PKEY* load_or_create_ec_key(const fs::path& path) {
+EVP_PKEY* load_or_create_ec_key(const fs::path& path) {
     if (fs::exists(path)) {
         FILE* f = fopen(path.string().c_str(), "r");
         if (!f) throw std::runtime_error("Cannot open account key: " + path.string());
@@ -198,14 +198,14 @@ inline EVP_PKEY* load_or_create_ec_key(const fs::path& path) {
 }
 
 /// Return base64url representation of the 32-byte big-endian BIGNUM @p bn.
-inline std::string bn_b64url32(const BIGNUM* bn) {
+std::string bn_b64url32(const BIGNUM* bn) {
     uint8_t buf[32] = {};
     BN_bn2binpad(bn, buf, 32);
     return b64url(buf, 32);
 }
 
 /// Build the JWK object for an EC P-256 public key.
-inline json ec_jwk(EVP_PKEY* pkey) {
+json ec_jwk(EVP_PKEY* pkey) {
     BIGNUM* x = nullptr, *y = nullptr;
     EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_EC_PUB_X, &x);
     EVP_PKEY_get_bn_param(pkey, OSSL_PKEY_PARAM_EC_PUB_Y, &y);
@@ -223,7 +223,7 @@ inline json ec_jwk(EVP_PKEY* pkey) {
  * Compute the RFC 7638 JWK thumbprint (SHA-256 of canonical JSON, base64url).
  * Canonical member order for EC P-256: crv, kty, x, y.
  */
-inline std::string jwk_thumbprint(EVP_PKEY* pkey) {
+std::string jwk_thumbprint(EVP_PKEY* pkey) {
     auto jwk = ec_jwk(pkey);
     // Lexicographic order is required by RFC 7638
     std::string canonical =
@@ -241,7 +241,7 @@ inline std::string jwk_thumbprint(EVP_PKEY* pkey) {
  * Sign `data` using ECDSA/SHA-256 (ES256).
  * Returns base64url-encoded raw R||S (64 bytes, as required by JWS RFC 7518).
  */
-inline std::string es256_sign(EVP_PKEY* pkey, const std::string& data) {
+std::string es256_sign(EVP_PKEY* pkey, const std::string& data) {
     // Digest-sign
     EVP_MD_CTX* mdctx = EVP_MD_CTX_new();
     EVP_DigestSignInit(mdctx, nullptr, EVP_sha256(), nullptr, pkey);
@@ -279,7 +279,7 @@ inline std::string es256_sign(EVP_PKEY* pkey, const std::string& data) {
  * @param pkey      EC P-256 account key.
  * @param kid       Account URL (empty string → use JWK instead of kid).
  */
-inline std::string make_jws(
+std::string make_jws(
     const json&        payload,
     const std::string& url,
     const std::string& nonce,
@@ -318,7 +318,7 @@ struct Directory {
     std::string new_order;
 };
 
-inline Directory fetch_directory(const std::string& dir_url, bool verbose = false) {
+Directory fetch_directory(const std::string& dir_url, bool verbose = false) {
     auto resp = http_request(dir_url, "GET", {}, {}, verbose);
     if (resp.status != 200)
         throw std::runtime_error("ACME directory fetch failed: HTTP " + std::to_string(resp.status));
@@ -330,7 +330,7 @@ inline Directory fetch_directory(const std::string& dir_url, bool verbose = fals
     };
 }
 
-inline std::string fresh_nonce(const std::string& new_nonce_url, bool verbose = false) {
+std::string fresh_nonce(const std::string& new_nonce_url, bool verbose = false) {
     auto resp = http_request(new_nonce_url, "HEAD", {}, {}, verbose);
     auto it   = resp.headers.find("replay-nonce");
     if (it == resp.headers.end())
@@ -347,7 +347,7 @@ inline std::string fresh_nonce(const std::string& new_nonce_url, bool verbose = 
  * @p domain_key_out receives the new EVP_PKEY (caller must EVP_PKEY_free it).
  * Returns the base64url-encoded DER CSR.
  */
-inline std::string generate_csr(const std::string& domain, EVP_PKEY*& domain_key_out) {
+std::string generate_csr(const std::string& domain, EVP_PKEY*& domain_key_out) {
     domain_key_out = EVP_RSA_gen(2048);
     if (!domain_key_out) throw std::runtime_error("EVP_RSA_gen for domain key failed");
 

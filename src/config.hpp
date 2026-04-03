@@ -21,7 +21,7 @@ struct AppConfig {
 
 /// Parse argv into an AppConfig.
 /// Throws std::runtime_error when a flag that expects a value is missing one.
-inline AppConfig parse_args(int argc, char* argv[]) {
+AppConfig parse_args(int argc, char* argv[]) {
     AppConfig cfg;
 
     for (int i = 1; i < argc; ++i) {

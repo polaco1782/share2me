@@ -7,10 +7,10 @@
 #include <nlohmann/json.hpp>
 #include <thread>
 
+namespace housekeeper {
+
 std::atomic<bool> stop_housekeep{false};
 std::thread housekeep_thread;
-
-namespace housekeeper {
 
 void start_housekeeper_thread() {
     // Background thread that periodically scans for expired files and removes them.

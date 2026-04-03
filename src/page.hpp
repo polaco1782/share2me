@@ -1,5 +1,7 @@
 #pragma once
 
+#include <string>
+
 static constexpr const char* INDEX_HTML = R"html(
 <!DOCTYPE html>
 <html lang="en">
@@ -222,7 +224,12 @@ static constexpr const char* INDEX_HTML = R"html(
             + '<br><br>Link: <a href="' + link + '">' + link + '</a>';
         } else {
           link = location.origin + '/' + data.hash;
-          resultDiv.innerHTML = '&#9989; Uploaded!<br><br>Link to file: <a href="' + link + '">' + link + '</a>';
+          let html = '&#9989; Uploaded!<br><br>&#128279; Link: <a href="' + link + '">' + link + '</a>';
+          if (data.content_type && data.content_type.startsWith('image/')) {
+            const vl = location.origin + '/v/' + data.hash;
+            html += '<br>&#128444;&#65039; View: <a href="' + vl + '">' + vl + '</a>';
+          }
+          resultDiv.innerHTML = html;
         }
       } else {
         resultDiv.innerHTML = '<span class="error">&#10060; ' + (data.error || 'Upload failed') + '</span>';
@@ -380,3 +387,189 @@ async function decryptAndDownload(token, keyB64, filename) {
 </body>
 </html>
 )html";
+
+/// Generate the image viewer HTML page with embedded metadata.
+std::string image_viewer_html(const std::string& token,
+                                      const std::string& filename,
+                                      bool single_download) {
+    // Escape filename for safe embedding in a JS single-quoted string
+    std::string js_name;
+    js_name.reserve(filename.size());
+    for (char c : filename) {
+        switch (c) {
+            case '\\': js_name += "\\\\"; break;
+            case '\'': js_name += "\\'";  break;
+            case '"':  js_name += "\\\""; break;
+            case '\n': js_name += "\\n";  break;
+            case '\r': js_name += "\\r";  break;
+            case '<':  js_name += "\\x3c"; break;
+            case '>':  js_name += "\\x3e"; break;
+            default:   js_name += c;
+        }
+    }
+
+    std::string sd = single_download ? "true" : "false";
+
+    return R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Share2Me &#8211; View</title>
+<style>
+  :root {
+    --bg: #0f172a; --surface: #1e293b; --border: #334155;
+    --text: #e2e8f0; --accent: #38bdf8; --accent-hover: #7dd3fc;
+    --danger: #f87171; --success: #4ade80; --warn: #fbbf24; --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; justify-content: center; align-items: center;
+    min-height: 100vh; padding: 1rem;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 2rem;
+    width: 100%; max-width: 900px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.35);
+    text-align: center;
+  }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .sub { color: #94a3b8; font-size: .85rem; margin-bottom: 1.2rem; }
+  .warning-box {
+    background: rgba(251,191,36,.08);
+    border: 1px solid rgba(251,191,36,.3);
+    border-radius: 8px; padding: 1.2rem; margin-bottom: 1.2rem;
+    color: var(--warn); font-size: .9rem; line-height: 1.6;
+  }
+  .consumed-box {
+    background: rgba(248,113,113,.08);
+    border: 1px solid rgba(248,113,113,.3);
+    border-radius: 8px; padding: .8rem; margin-top: 1rem;
+    color: var(--danger); font-size: .85rem;
+  }
+  .img-wrap { margin: 1rem 0; }
+  .img-wrap img {
+    max-width: 100%; max-height: 75vh;
+    border-radius: 8px; border: 1px solid var(--border);
+  }
+  .fname { color: #94a3b8; font-size: .85rem; margin-top: .5rem; }
+  .btn {
+    display: inline-block; padding: .65rem 1.4rem;
+    border: none; border-radius: var(--radius);
+    background: var(--accent); color: #0f172a;
+    font-weight: 600; font-size: .95rem;
+    cursor: pointer; transition: background .2s;
+    text-decoration: none; margin: .3rem;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn-sm { padding: .45rem 1rem; font-size: .85rem; }
+  .error-msg { color: var(--danger); }
+  .spinner {
+    display: inline-block; width: 1.1rem; height: 1.1rem;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .7s linear infinite;
+    vertical-align: middle; margin-right: .4rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>&#128444;&#65039; Share2Me</h1>
+  <p class="sub">Image Viewer</p>
+
+  <div id="warning" style="display:none">
+    <div class="warning-box">
+      &#9888;&#65039; <strong>Single-use file!</strong><br>
+      Viewing <strong id="warnName"></strong> will consume the link.<br>
+      It cannot be viewed or downloaded again afterwards.
+    </div>
+    <button class="btn" id="viewBtn">View Image</button>
+  </div>
+
+  <div id="loading" style="display:none">
+    <span class="spinner"></span> Loading image&#8230;
+  </div>
+
+  <div id="errorBox" style="display:none"></div>
+
+  <div id="imageArea" style="display:none">
+    <div class="img-wrap"><img id="img" alt="Shared image" /></div>
+    <p class="fname" id="fname"></p>
+    <button class="btn btn-sm" id="saveBtn">&#128190; Save Image</button>
+    <div id="consumed" class="consumed-box" style="display:none">
+      &#9888;&#65039; This was a single-use file &#8212; it has been consumed and cannot be viewed again.
+    </div>
+  </div>
+
+  <div style="margin-top:1.2rem;font-size:.85rem">
+    <a href="/">&#8592; Upload another file</a>
+  </div>
+  <div style="text-align:center;margin-top:12px;color:#94a3b8;font-size:.85rem">
+    Copyright &#169; 2026 Cassiano Martin
+    <br>
+    <a href="https://github.com/polaco1782/share2me" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">Project on GitHub</a>
+  </div>
+</div>
+<script>
+const TOKEN = ')html" + token + R"html(';
+const FILENAME = ')html" + js_name + R"html(';
+const SINGLE_DOWNLOAD = )html" + sd + R"html(;
+
+let blobUrl = null;
+
+async function loadImage() {
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('warning').style.display = 'none';
+  try {
+    const res = await fetch('/' + TOKEN);
+    if (!res.ok) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('errorBox').style.display = 'block';
+      document.getElementById('errorBox').innerHTML =
+        '<span class="error-msg">&#10060; File not found or link has expired.</span>';
+      return;
+    }
+    const blob = await res.blob();
+    blobUrl = URL.createObjectURL(blob);
+    document.getElementById('img').src = blobUrl;
+    document.getElementById('fname').textContent = FILENAME;
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('imageArea').style.display = 'block';
+    if (SINGLE_DOWNLOAD)
+      document.getElementById('consumed').style.display = 'block';
+  } catch (err) {
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('errorBox').style.display = 'block';
+    document.getElementById('errorBox').innerHTML =
+      '<span class="error-msg">&#10060; Failed to load image: ' + err.message + '</span>';
+  }
+}
+
+document.getElementById('saveBtn').addEventListener('click', function() {
+  if (!blobUrl) return;
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = FILENAME;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { a.remove(); }, 100);
+});
+
+if (SINGLE_DOWNLOAD) {
+  document.getElementById('warnName').textContent = FILENAME;
+  document.getElementById('warning').style.display = 'block';
+  document.getElementById('viewBtn').addEventListener('click', loadImage);
+} else {
+  loadImage();
+}
+</script>
+</body>
+</html>
+)html";
+}

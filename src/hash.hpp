@@ -13,7 +13,7 @@ namespace fs = std::filesystem;
 
 /// Compute SHA-256 of a memory buffer.
 /// Returns a 64-character lowercase hex string.
-inline std::string sha256_bytes(const void* data, std::size_t len) {
+std::string sha256_bytes(const void* data, std::size_t len) {
     unsigned char digest[EVP_MAX_MD_SIZE];
     unsigned int  dlen = 0;
 
@@ -32,7 +32,7 @@ inline std::string sha256_bytes(const void* data, std::size_t len) {
 
 /// Compute SHA-256 of a file, streamed in 64 KiB chunks.
 /// Returns an empty string if the file cannot be opened.
-inline std::string sha256_file(const fs::path& path) {
+std::string sha256_file(const fs::path& path) {
     std::ifstream ifs(path, std::ios::binary);
     if (!ifs) return {};
 
