@@ -15,6 +15,7 @@ Everything runs over HTTPS. A TLS certificate is generated automatically on the 
 - **End-to-end encryption** — tick one checkbox to encrypt files in the browser before they leave your machine. The server only ever sees ciphertext; the key never travels over the network.
 - **Your own domain with a real certificate** — point Share2Me at your domain and let it get a free Let's Encrypt certificate automatically.
 - **HTTP → HTTPS redirect** — anyone who visits the plain HTTP address is silently redirected to HTTPS.
+- **Image viewer** — image uploads open in an in-browser viewer (`/v/<token>`) rather than triggering a download. E2EE images are decrypted and displayed entirely client-side.
 
 ## Getting a pre-built binary
 
@@ -70,6 +71,14 @@ GitHub Actions will build, strip, and attach the binary to the release automatic
 
 Then open `https://localhost:8443` in your browser.
 
+### Other endpoints
+
+| Path | Description |
+|------|-------------|
+| `GET /healthz` | Returns `200 OK` — useful for load balancers and uptime monitors |
+| `GET /v/<token>` | Opens an image in the in-browser viewer instead of downloading it |
+| `GET /d/<token>` | Serves the client-side decryption page for E2EE files |
+
 ### All options
 
 | Flag | Default | What it does |
@@ -82,6 +91,7 @@ Then open `https://localhost:8443` in your browser.
 | `--acme` | off | Obtain a certificate from Let's Encrypt automatically |
 | `--email EMAIL` | — | Your email address (required when using `--acme`) |
 | `--staging` | off | Use Let's Encrypt's test environment (certificate won't be trusted by browsers) |
+| `--acme-verbose` | off | Print detailed ACME protocol output (useful for debugging Let's Encrypt certificate requests) |
 | `--sandbox` | off | Lock the process inside a chroot jail (requires root) |
 | `--user NAME` | — | Drop privileges to this system user after startup (requires root) |
 
@@ -189,6 +199,15 @@ The short version: share the link only with the people you trust, and the file i
 ## TLS certificates
 
 On the very first run, if no certificate files are found, Share2Me generates a self-signed certificate automatically. It covers the configured domain, `localhost`, and `127.0.0.1`, and is valid for 10 years. You'll get a browser warning the first time because the certificate is self-signed — that's expected. You can dismiss it or, for a trusted certificate, use Let's Encrypt via `--acme`.
+
+### Automatic renewal
+
+A background thread checks certificate validity every 12 hours. When the certificate is within 30 days of expiry, it is renewed automatically — no restart required. The live TLS context is hot-reloaded so new connections immediately use the fresh certificate:
+
+- **With `--acme`** — renewed via Let's Encrypt. If ACME fails for any reason, a fresh self-signed certificate is generated as a fallback.
+- **Without `--acme`** — a new self-signed certificate is generated and the old one is replaced.
+
+> **Sandbox mode** — when `--sandbox` is active, the renewal thread is not started. Certificate files on the real filesystem are unreachable from inside the chroot jail, so renewal must be handled manually (stop the server, replace the certificate outside the jail, restart).
 
 To swap the certificate at any time, just delete `cert.pem` and `key.pem` and restart — a new one will be generated — or point `--cert` and `--key` at your own files.
 
