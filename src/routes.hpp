@@ -257,6 +257,7 @@ void register_routes(crow::SimpleApp& app) {
     });
 
     // GET /v/<token> - image viewer (displays the image in an HTML page).
+    // For E2EE images the key+filename arrive in the URL fragment (never sent to server).
     CROW_ROUTE(app, "/v/<string>")
     ([](const std::string& token) {
         if (!is_valid_token(token))
@@ -266,8 +267,12 @@ void register_routes(crow::SimpleApp& app) {
         if (!opt) return crow::response(404, "Not found");
         auto& meta = *opt;
 
-        // Only allow viewing for non-encrypted image types
-        if (meta.value("encrypted", false) ||
+        bool encrypted = meta.value("encrypted", false);
+
+        // Must be an image (content_type check only applies to non-encrypted;
+        // for E2EE files the content_type is always application/octet-stream
+        // so we trust the original filename extension from the URL fragment).
+        if (!encrypted &&
             meta.value("content_type", "").compare(0, 6, "image/") != 0)
             return crow::response(404, "Not found");
 
@@ -276,9 +281,17 @@ void register_routes(crow::SimpleApp& app) {
 
         crow::response res(200);
         res.set_header("Content-Type", "text/html; charset=utf-8");
-        res.body = image_viewer_html(token,
-                                     meta.value("filename", "image"),
-                                     meta.value("single_download", false));
+
+        if (encrypted) {
+            // E2EE image viewer — decryption happens client-side.
+            // The token is embedded; key + filename come from the fragment.
+            res.body = encrypted_image_viewer_html(token,
+                           meta.value("single_download", false));
+        } else {
+            res.body = image_viewer_html(token,
+                           meta.value("filename", "image"),
+                           meta.value("single_download", false));
+        }
         return res;
     });
 

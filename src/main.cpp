@@ -33,7 +33,10 @@ int main(int argc, char* argv[]) {
 
     if (cfg.http_port > 0) {
         http_thread = std::thread([&] {
-            http_app.port(cfg.http_port).multithreaded().run();
+            http_app.port(cfg.http_port)
+                .bindaddr("::")
+                .multithreaded()
+                .run();
         });
         // Give the HTTP server a moment to bind before ACME starts.
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -124,7 +127,12 @@ int main(int argc, char* argv[]) {
 
     CROW_LOG_INFO << "Share2Me (HTTPS) listening on " << cfg.https_port
                   << "  |  HTTP redirect on " << cfg.http_port;
-    app.port(cfg.https_port).ssl(std::move(ssl_ctx)).multithreaded().run();
+
+    app.port(cfg.https_port)
+        .bindaddr("::")
+        .ssl(std::move(ssl_ctx))
+        .multithreaded()
+        .run();
 
     cert_mgr::stop_renewal_thread();
     housekeeper::stop_housekeeper_thread();
