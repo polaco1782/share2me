@@ -27,6 +27,15 @@ void start_housekeeper_thread() {
 
                 for (auto& entry : fs::directory_iterator(DATA_DIR)) {
                     if (entry.path().extension() != ".json") continue;
+
+                    // Skip symlinks to prevent symlink attacks
+                    std::error_code ec;
+                    if (entry.is_symlink(ec)) {
+                        CROW_LOG_WARNING << "Housekeep: skipping symlink: "
+                                         << entry.path().filename();
+                        continue;
+                    }
+
                     try {
                         nlohmann::json meta;
                         {
@@ -38,9 +47,18 @@ void start_housekeeper_thread() {
                         long long expires_at = meta["expires_at"].get<long long>();
                         if (now_sec >= expires_at) {
                             std::string stored_as = meta.value("stored_as", "");
-                            std::error_code ec;
-                            if (!stored_as.empty())
-                                fs::remove(DATA_DIR / stored_as, ec);
+
+                            // Verify stored file is not a symlink before removing
+                            if (!stored_as.empty()) {
+                                fs::path stored_path = DATA_DIR / stored_as;
+                                if (fs::is_symlink(stored_path, ec)) {
+                                    CROW_LOG_WARNING << "Housekeep: refusing to remove symlink: "
+                                                     << stored_as;
+                                } else {
+                                    fs::remove(stored_path, ec);
+                                }
+                            }
+
                             fs::remove(entry.path(), ec);
                             CROW_LOG_INFO << "Housekeep: expired file removed: "
                                           << meta.value("id", "?");

@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -40,6 +41,21 @@ struct CertConfig {
     bool        acme_verbose = false;
 };
 
+/// Persist the in-memory ACME challenge map to acme_work/challenges.json so
+/// that challenges survive a server restart during the validation window.
+inline void save_challenges(
+    const std::unordered_map<std::string, std::string>& challenges)
+{
+    try {
+        fs::create_directories("acme_work");
+        nlohmann::json j;
+        for (auto& [k, v] : challenges)
+            j[k] = v;
+        std::ofstream ofs("acme_work/challenges.json");
+        if (ofs) ofs << j.dump(2);
+    } catch (...) {}
+}
+
 // Initial certificate provisioning
 
 /// Perform initial certificate provisioning (ACME or self-signed).
@@ -68,11 +84,13 @@ void provision_certificates(
                     [&](const std::string& token, const std::string& key_auth) {
                         std::lock_guard lock(acme_mutex);
                         acme_challenges[token] = key_auth;
+                        save_challenges(acme_challenges);
                         CROW_LOG_INFO << "ACME: challenge token registered: " << token;
                     },
                     [&](const std::string& token) {
                         std::lock_guard lock(acme_mutex);
                         acme_challenges.erase(token);
+                        save_challenges(acme_challenges);
                     });
                 CROW_LOG_INFO << "Let's Encrypt certificate obtained successfully";
             } catch (const std::exception& ex) {
@@ -148,12 +166,14 @@ void start_renewal_thread(
                                 const std::string& key_auth) {
                                 std::lock_guard lock(acme_mutex);
                                 acme_challenges[token] = key_auth;
+                                save_challenges(acme_challenges);
                                 CROW_LOG_INFO << "ACME renewal: challenge token "
                                                  "registered: " << token;
                             },
                             [&](const std::string& token) {
                                 std::lock_guard lock(acme_mutex);
                                 acme_challenges.erase(token);
+                                save_challenges(acme_challenges);
                             });
 
                         CROW_LOG_INFO << "Cert renewal: ACME certificate renewed "

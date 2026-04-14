@@ -9,6 +9,7 @@
 
 #include <chrono>
 #include <filesystem>
+#include <fstream>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -24,6 +25,21 @@ int main(int argc, char* argv[]) {
     fs::create_directories(DATA_DIR);
     std::mutex acme_mutex;
     std::unordered_map<std::string, std::string> acme_challenges;
+    // Restore any ACME challenges that were persisted before a restart.
+    // This closes the window where a restart during the validation handshake
+    // would cause the challenge HTTP response to return 404.
+    try {
+        std::ifstream ifs("acme_work/challenges.json");
+        if (ifs) {
+            nlohmann::json j;
+            ifs >> j;
+            for (auto& [k, v] : j.items())
+                acme_challenges[k] = v.get<std::string>();
+            if (!acme_challenges.empty())
+                CROW_LOG_INFO << "Restored " << acme_challenges.size()
+                              << " persisted ACME challenge(s)";
+        }
+    } catch (...) {}
     crow::SimpleApp http_app;
     std::thread http_thread;
 
@@ -107,7 +123,7 @@ int main(int argc, char* argv[]) {
 
     crow::SimpleApp app;
     app.loglevel(crow::LogLevel::Info);
-    register_routes(app);
+    register_routes(app, cfg);
 
     auto ssl_ctx = tls_util::create_ssl_context(tls);
 

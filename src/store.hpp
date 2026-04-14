@@ -7,7 +7,9 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iomanip>
 #include <random>
+#include <sstream>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -22,17 +24,83 @@ struct UploadResult {
     std::string error;
 };
 
-/// Generate a random 10-character lowercase hex token used as the URL identifier.
+/// Generate a random 16-character lowercase hex token used as the URL identifier.
+/// Uses the full 64-bit mt19937_64 output (2^64 space) to resist brute-force.
 std::string generate_token() {
     static thread_local std::mt19937_64 rng{std::random_device{}()};
     std::uniform_int_distribution<std::uint64_t> dist;
     std::uint64_t value = dist(rng);
 
     std::ostringstream oss;
-    oss << std::hex << (value & 0xFF'FFFF'FFFFull); // 10 hex chars
-    std::string h = oss.str();
-    while (h.size() < 10) h.insert(h.begin(), '0'); // pad leading zeros
-    return h;
+    oss << std::hex << std::setfill('0') << std::setw(16) << value;
+    return oss.str();
+}
+
+/// Check if a path is safe for file operations (no symlink attacks).
+/// Returns false if the path contains symlinks or is outside DATA_DIR.
+bool is_path_safe(const fs::path& path, const fs::path& base_dir) {
+    std::error_code ec;
+
+    // Resolve to canonical path (follows symlinks)
+    fs::path resolved = fs::canonical(path, ec);
+    if (ec) {
+        // File doesn't exist yet - check parent directory
+        fs::path parent = path.parent_path();
+        if (parent.empty() || parent == ".") {
+            parent = base_dir;
+        }
+        resolved = fs::canonical(parent, ec);
+        if (ec) return false;
+        resolved /= path.filename();
+    }
+
+    // Get canonical base directory
+    fs::path canonical_base = fs::canonical(base_dir, ec);
+    if (ec) return false;
+
+    // Ensure resolved path starts with base directory
+    auto resolved_str = resolved.string();
+    auto base_str = canonical_base.string();
+
+    if (resolved_str.compare(0, base_str.size(), base_str) != 0) {
+        return false;
+    }
+
+    // Ensure it's exactly under base (not just a prefix match)
+    if (resolved_str.size() > base_str.size() &&
+        resolved_str[base_str.size()] != '/') {
+        return false;
+    }
+
+    return true;
+}
+
+/// Validate filename doesn't contain dangerous patterns for storage.
+bool is_filename_safe_for_storage(const std::string& filename) {
+    // Reject null bytes
+    if (filename.find('\0') != std::string::npos) {
+        return false;
+    }
+
+    // Reject path separators
+    if (filename.find('/') != std::string::npos ||
+        filename.find('\\') != std::string::npos) {
+        return false;
+    }
+
+    // Reject parent directory references
+    if (filename == ".." || filename == "." ||
+        filename.find("../") != std::string::npos ||
+        filename.find("..\\") != std::string::npos) {
+        return false;
+    }
+
+    // Limit length
+    if (filename.length() > 255) {
+        return false;
+    }
+
+    return true;
 }
 
 UploadResult store_file(const std::string& body,
@@ -48,6 +116,12 @@ UploadResult store_file(const std::string& body,
         return res;
     }
 
+    // Validate filename for storage safety
+    if (!is_filename_safe_for_storage(filename)) {
+        res.error = "Invalid filename";
+        return res;
+    }
+
     res.sha256 = sha256_bytes(body.data(), body.size());
 
     for (int attempts = 0; attempts < 20; ++attempts) {
@@ -57,9 +131,26 @@ UploadResult store_file(const std::string& body,
 
     const std::string stored_as = res.token + "_" + filename;
 
+    // Verify the final storage path is safe (no symlink attacks)
+    fs::path full_path = DATA_DIR / stored_as;
+    if (!is_path_safe(full_path, DATA_DIR)) {
+        res.error = "Invalid storage path";
+        return res;
+    }
+
     {
-        std::ofstream ofs(DATA_DIR / stored_as, std::ios::binary);
+        std::ofstream ofs(full_path, std::ios::binary);
+        if (!ofs) {
+            res.error = "Failed to open file for writing";
+            return res;
+        }
         ofs.write(body.data(), static_cast<std::streamsize>(body.size()));
+        if (!ofs) {
+            res.error = "Failed to write file";
+            std::error_code ec;
+            fs::remove(full_path, ec);
+            return res;
+        }
     }
 
     nlohmann::json meta;
@@ -77,6 +168,12 @@ UploadResult store_file(const std::string& body,
     }
     {
         std::ofstream ofs(DATA_DIR / (res.token + ".json"));
+        if (!ofs) {
+            res.error = "Failed to write metadata";
+            std::error_code ec;
+            fs::remove(full_path, ec);
+            return res;
+        }
         ofs << meta.dump(2);
     }
 

@@ -9,6 +9,14 @@ static constexpr const char* INDEX_HTML = R"html(
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Share2Me</title>
+<meta name="description" content="Quick &amp; simple file sharing. Upload a file and get a shareable link instantly." />
+<meta property="og:type"        content="website" />
+<meta property="og:site_name"   content="Share2Me" />
+<meta property="og:title"       content="Share2Me – Quick &amp; simple file sharing" />
+<meta property="og:description" content="Upload a file and get a shareable link instantly. Supports single-use links, expiry timers, and end-to-end encryption." />
+<meta name="twitter:card"        content="summary" />
+<meta name="twitter:title"       content="Share2Me – Quick &amp; simple file sharing" />
+<meta name="twitter:description" content="Upload a file and get a shareable link instantly. Supports single-use links, expiry timers, and end-to-end encryption." />
 <style>
   :root {
     --bg: #0f172a; --surface: #1e293b; --border: #334155;
@@ -247,7 +255,7 @@ static constexpr const char* INDEX_HTML = R"html(
           let ehtml = '&#128274; Encrypted &amp; Uploaded!<br><br>'
             + '<small style="color:#4ade80">Key is in the link only &#8212; never sent to the server.</small>'
             + '<br><br>&#128279; Download: <a class="copy-link" href="#" data-url="' + link + '">' + link + '</a>';
-          if (file.type && file.type.startsWith('image/')) {
+          if (file.type && (file.type.startsWith('image/') || file.type.startsWith('text/') || file.type === 'application/json' || file.type === 'application/xml' || file.type === 'application/javascript')) {
             const vl = location.origin + '/v/' + data.hash + '#' + p.toString();
             ehtml += '<br><br>&#128444;&#65039; View: <a class="copy-link" href="#" data-url="' + vl + '">' + vl + '</a>';
           }
@@ -257,7 +265,7 @@ static constexpr const char* INDEX_HTML = R"html(
         } else {
           link = location.origin + '/' + data.hash;
           let html = '&#9989; Uploaded!<br><br>&#128279; Download: <a class="copy-link" href="#" data-url="' + link + '">' + link + '</a>';
-          if (data.content_type && data.content_type.startsWith('image/')) {
+          if (data.content_type && (data.content_type.startsWith('image/') || data.content_type.startsWith('text/') || data.content_type === 'application/json' || data.content_type === 'application/xml' || data.content_type === 'application/javascript')) {
             const vl = location.origin + '/v/' + data.hash;
             html += '<br><br>&#128444;&#65039; View: <a class="copy-link" href="#" data-url="' + vl + '">' + vl + '</a>';
           }
@@ -288,6 +296,14 @@ static constexpr const char* DECRYPT_PAGE_HTML = R"html(
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Share2Me &#8211; Decrypt</title>
+<meta name="description" content="Download this end-to-end encrypted file shared via Share2Me." />
+<meta property="og:type"        content="website" />
+<meta property="og:site_name"   content="Share2Me" />
+<meta property="og:title"       content="Share2Me – Encrypted file" />
+<meta property="og:description" content="Download this end-to-end encrypted file shared via Share2Me." />
+<meta name="twitter:card"        content="summary" />
+<meta name="twitter:title"       content="Share2Me – Encrypted file" />
+<meta name="twitter:description" content="Download this end-to-end encrypted file shared via Share2Me." />
 <style>
   :root {
     --bg: #0f172a; --surface: #1e293b; --border: #334155;
@@ -422,10 +438,12 @@ async function decryptAndDownload(token, keyB64, filename) {
 </html>
 )html";
 
-/// Generate the image viewer HTML page with embedded metadata.
-std::string image_viewer_html(const std::string& token,
-                                      const std::string& filename,
-                                      bool single_download) {
+/// Generate the text viewer HTML page with embedded metadata.
+/// Displays the text content in a <pre> block with syntax-friendly styling.
+std::string text_viewer_html(const std::string& token,
+                             const std::string& filename,
+                             bool single_download,
+                             const std::string& base_url = "") {
     // Escape filename for safe embedding in a JS single-quoted string
     std::string js_name;
     js_name.reserve(filename.size());
@@ -444,13 +462,479 @@ std::string image_viewer_html(const std::string& token,
 
     std::string sd = single_download ? "true" : "false";
 
+    // Build OG meta block
+    std::string og_url  = base_url.empty() ? "" : base_url + "/v/" + token;
+    std::string og_desc = "View " + filename + " shared via Share2Me.";
+    std::string og_meta =
+        "<meta name=\"description\" content=\"" + og_desc + "\" />\n"
+        "<meta property=\"og:type\"        content=\"website\" />\n"
+        "<meta property=\"og:site_name\"   content=\"Share2Me\" />\n"
+        "<meta property=\"og:title\"       content=\"Share2Me \xe2\x80\x93 " + filename + "\" />\n"
+        "<meta property=\"og:description\" content=\"" + og_desc + "\" />\n"
+        + (og_url.empty() ? "" :
+            "<meta property=\"og:url\"         content=\"" + og_url + "\" />\n")
+        + "<meta name=\"twitter:card\"        content=\"summary\" />\n"
+          "<meta name=\"twitter:title\"       content=\"Share2Me \xe2\x80\x93 " + filename + "\" />\n"
+          "<meta name=\"twitter:description\" content=\"" + og_desc + "\" />\n";
+
     return R"html(<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Share2Me &#8211; View</title>
-<style>
+)html" + og_meta + R"html(<style>
+  :root {
+    --bg: #0f172a; --surface: #1e293b; --border: #334155;
+    --text: #e2e8f0; --accent: #38bdf8; --accent-hover: #7dd3fc;
+    --danger: #f87171; --success: #4ade80; --warn: #fbbf24; --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; justify-content: center; align-items: flex-start;
+    min-height: 100vh; padding: 2rem 1rem;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 2rem;
+    width: 100%; max-width: 1000px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .sub { color: #94a3b8; font-size: .85rem; margin-bottom: 1.2rem; }
+  .warning-box {
+    background: rgba(251,191,36,.08);
+    border: 1px solid rgba(251,191,36,.3);
+    border-radius: 8px; padding: 1.2rem; margin-bottom: 1.2rem;
+    color: var(--warn); font-size: .9rem; line-height: 1.6;
+  }
+  .consumed-box {
+    background: rgba(248,113,113,.08);
+    border: 1px solid rgba(248,113,113,.3);
+    border-radius: 8px; padding: .8rem; margin-top: 1rem;
+    color: var(--danger); font-size: .85rem;
+  }
+  .text-wrap {
+    margin: 1rem 0; background: #0d1117;
+    border: 1px solid var(--border); border-radius: 8px;
+    overflow: auto; max-height: 75vh;
+  }
+  .text-wrap pre {
+    margin: 0; padding: 1.2rem;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: .9rem; line-height: 1.6;
+    color: #e6edf3; white-space: pre; tab-size: 4;
+  }
+  .fname { color: #94a3b8; font-size: .85rem; margin-top: .5rem; }
+  .btn {
+    display: inline-block; padding: .65rem 1.4rem;
+    border: none; border-radius: var(--radius);
+    background: var(--accent); color: #0f172a;
+    font-weight: 600; font-size: .95rem;
+    cursor: pointer; transition: background .2s;
+    text-decoration: none; margin: .3rem;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn-sm { padding: .45rem 1rem; font-size: .85rem; }
+  .error-msg { color: var(--danger); }
+  .spinner {
+    display: inline-block; width: 1.1rem; height: 1.1rem;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .7s linear infinite;
+    vertical-align: middle; margin-right: .4rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>&#128221; Share2Me</h1>
+  <p class="sub">Text Viewer</p>
+
+  <div id="warning" style="display:none">
+    <div class="warning-box">
+      &#9888;&#65039; <strong>Single-use file!</strong><br>
+      Viewing <strong id="warnName"></strong> will consume the link.<br>
+      It cannot be viewed or downloaded again afterwards.
+    </div>
+    <button class="btn" id="viewBtn">View Text</button>
+  </div>
+
+  <div id="loading" style="display:none">
+    <span class="spinner"></span> Loading text&#8230;
+  </div>
+
+  <div id="errorBox" style="display:none"></div>
+
+  <div id="textArea" style="display:none">
+    <div class="text-wrap"><pre id="textContent"></pre></div>
+    <p class="fname" id="fname"></p>
+    <button class="btn btn-sm" id="saveBtn">&#128190; Save File</button>
+    <div id="consumed" class="consumed-box" style="display:none">
+      &#9888;&#65039; This was a single-use file &#8212; it has been consumed and cannot be viewed again.
+    </div>
+  </div>
+
+  <div style="margin-top:1.2rem;font-size:.85rem">
+    <a href="/">&#8592; Upload another file</a>
+  </div>
+  <div style="text-align:center;margin-top:12px;color:#94a3b8;font-size:.85rem">
+    Copyright &#169; 2026 Cassiano Martin
+    <br>
+    <a href="https://github.com/polaco1782/share2me" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">Project on GitHub</a>
+  </div>
+</div>
+<script>
+const TOKEN = ')html" + token + R"html(';
+const FILENAME = ')html" + js_name + R"html(';
+const SINGLE_DOWNLOAD = )html" + sd + R"html(;
+
+let blobUrl = null;
+
+async function loadText() {
+  document.getElementById('loading').style.display = 'block';
+  document.getElementById('warning').style.display = 'none';
+  try {
+    const res = await fetch('/' + TOKEN);
+    if (!res.ok) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('errorBox').style.display = 'block';
+      document.getElementById('errorBox').innerHTML =
+        '<span class="error-msg">&#10060; File not found or link has expired.</span>';
+      return;
+    }
+    const text = await res.text();
+    blobUrl = URL.createObjectURL(new Blob([text]));
+    document.getElementById('textContent').textContent = text;
+    document.getElementById('fname').textContent = FILENAME;
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('textArea').style.display = 'block';
+    if (SINGLE_DOWNLOAD)
+      document.getElementById('consumed').style.display = 'block';
+  } catch (err) {
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('errorBox').style.display = 'block';
+    document.getElementById('errorBox').innerHTML =
+      '<span class="error-msg">&#10060; Failed to load text: ' + err.message + '</span>';
+  }
+}
+
+document.getElementById('saveBtn').addEventListener('click', function() {
+  if (!blobUrl) return;
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = FILENAME;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { a.remove(); }, 100);
+});
+
+if (SINGLE_DOWNLOAD) {
+  document.getElementById('warnName').textContent = FILENAME;
+  document.getElementById('warning').style.display = 'block';
+  document.getElementById('viewBtn').addEventListener('click', loadText);
+} else {
+  loadText();
+}
+</script>
+</body>
+</html>
+)html";
+}
+
+/// Generate the E2EE text viewer HTML page.
+/// The AES key and original filename arrive via the URL fragment (#k=...&n=...).
+std::string encrypted_text_viewer_html(const std::string& token,
+                                       bool single_download,
+                                       const std::string& base_url = "") {
+    std::string sd = single_download ? "true" : "false";
+    std::string og_url  = base_url.empty() ? "" : base_url + "/v/" + token;
+    std::string og_desc = "View this encrypted file shared via Share2Me. The decryption key is only in the link.";
+    std::string og_meta =
+        "<meta name=\"description\" content=\"" + og_desc + "\" />\n"
+        "<meta property=\"og:type\"        content=\"website\" />\n"
+        "<meta property=\"og:site_name\"   content=\"Share2Me\" />\n"
+        "<meta property=\"og:title\"       content=\"Share2Me \xe2\x80\x93 Encrypted text file\" />\n"
+        "<meta property=\"og:description\" content=\"" + og_desc + "\" />\n"
+        + (og_url.empty() ? "" :
+            "<meta property=\"og:url\"         content=\"" + og_url + "\" />\n")
+        + "<meta name=\"twitter:card\"        content=\"summary\" />\n"
+          "<meta name=\"twitter:title\"       content=\"Share2Me \xe2\x80\x93 Encrypted text file\" />\n"
+          "<meta name=\"twitter:description\" content=\"" + og_desc + "\" />\n";
+
+    return R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Share2Me &#8211; Encrypted View</title>
+)html" + og_meta + R"html(<style>
+  :root {
+    --bg: #0f172a; --surface: #1e293b; --border: #334155;
+    --text: #e2e8f0; --accent: #38bdf8; --accent-hover: #7dd3fc;
+    --danger: #f87171; --success: #4ade80; --warn: #fbbf24; --radius: 12px;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: 'Inter', system-ui, -apple-system, sans-serif;
+    background: var(--bg); color: var(--text);
+    display: flex; justify-content: center; align-items: flex-start;
+    min-height: 100vh; padding: 2rem 1rem;
+  }
+  .card {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 2rem;
+    width: 100%; max-width: 1000px;
+    box-shadow: 0 8px 30px rgba(0,0,0,.35);
+  }
+  h1 { font-size: 1.4rem; margin-bottom: .25rem; }
+  .sub { color: #94a3b8; font-size: .85rem; margin-bottom: 1.2rem; }
+  .warning-box {
+    background: rgba(251,191,36,.08);
+    border: 1px solid rgba(251,191,36,.3);
+    border-radius: 8px; padding: 1.2rem; margin-bottom: 1.2rem;
+    color: var(--warn); font-size: .9rem; line-height: 1.6;
+  }
+  .consumed-box {
+    background: rgba(248,113,113,.08);
+    border: 1px solid rgba(248,113,113,.3);
+    border-radius: 8px; padding: .8rem; margin-top: 1rem;
+    color: var(--danger); font-size: .85rem;
+  }
+  .note {
+    font-size: .8rem; color: #64748b; margin-top: 1rem;
+    padding: .75rem 1rem; background: rgba(56,189,248,.04);
+    border: 1px solid rgba(56,189,248,.1); border-radius: 8px;
+    line-height: 1.5;
+  }
+  .text-wrap {
+    margin: 1rem 0; background: #0d1117;
+    border: 1px solid var(--border); border-radius: 8px;
+    overflow: auto; max-height: 75vh;
+  }
+  .text-wrap pre {
+    margin: 0; padding: 1.2rem;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', 'Consolas', monospace;
+    font-size: .9rem; line-height: 1.6;
+    color: #e6edf3; white-space: pre; tab-size: 4;
+  }
+  .fname { color: #94a3b8; font-size: .85rem; margin-top: .5rem; }
+  .btn {
+    display: inline-block; padding: .65rem 1.4rem;
+    border: none; border-radius: var(--radius);
+    background: var(--accent); color: #0f172a;
+    font-weight: 600; font-size: .95rem;
+    cursor: pointer; transition: background .2s;
+    text-decoration: none; margin: .3rem;
+  }
+  .btn:hover { background: var(--accent-hover); }
+  .btn-sm { padding: .45rem 1rem; font-size: .85rem; }
+  .error-msg { color: var(--danger); }
+  .spinner {
+    display: inline-block; width: 1.1rem; height: 1.1rem;
+    border: 2px solid var(--border); border-top-color: var(--accent);
+    border-radius: 50%; animation: spin .7s linear infinite;
+    vertical-align: middle; margin-right: .4rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .e2ee-badge {
+    display: inline-flex; align-items: center; gap: .25rem;
+    font-size: .72rem; font-weight: 700; letter-spacing: .02em;
+    color: #4ade80; background: rgba(74,222,128,.1);
+    border: 1px solid rgba(74,222,128,.25);
+    border-radius: 4px; padding: .1rem .45rem;
+    vertical-align: middle; margin-left: .3rem;
+  }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>&#128274; Share2Me</h1>
+  <p class="sub">Encrypted Text Viewer <span class="e2ee-badge">&#128274; E2EE</span></p>
+
+  <div id="warning" style="display:none">
+    <div class="warning-box">
+      &#9888;&#65039; <strong>Single-use file!</strong><br>
+      Viewing <strong id="warnName"></strong> will consume the link.<br>
+      It cannot be viewed or downloaded again afterwards.
+    </div>
+    <button class="btn" id="viewBtn">Decrypt &amp; View Text</button>
+  </div>
+
+  <div id="loading" style="display:none">
+    <span class="spinner"></span> Fetching &amp; decrypting&#8230;
+  </div>
+
+  <div id="errorBox" style="display:none"></div>
+
+  <div id="textArea" style="display:none">
+    <div class="text-wrap"><pre id="textContent"></pre></div>
+    <p class="fname" id="fname"></p>
+    <button class="btn btn-sm" id="saveBtn">&#128190; Save File</button>
+    <div id="consumed" class="consumed-box" style="display:none">
+      &#9888;&#65039; This was a single-use file &#8212; it has been consumed and cannot be viewed again.
+    </div>
+  </div>
+
+  <div class="note">
+    &#128273; The decryption key lives only in your browser&#8217;s address bar
+    and was never transmitted to the server.
+  </div>
+
+  <div style="margin-top:1.2rem;font-size:.85rem">
+    <a href="/">&#8592; Upload another file</a>
+  </div>
+  <div style="text-align:center;margin-top:12px;color:#94a3b8;font-size:.85rem">
+    Copyright &#169; 2026 Cassiano Martin
+    <br>
+    <a href="https://github.com/polaco1782/share2me" target="_blank" rel="noopener noreferrer" style="color:var(--accent);text-decoration:none">Project on GitHub</a>
+  </div>
+</div>
+<script>
+const TOKEN = ')html" + token + R"html(';
+const SINGLE_DOWNLOAD = )html" + sd + R"html(;
+
+const hash   = new URLSearchParams(location.hash.slice(1));
+const keyB64 = hash.get('k');
+const FILENAME = hash.get('n') ? decodeURIComponent(hash.get('n')) : 'text';
+
+let blobUrl = null;
+
+if (!keyB64) {
+  document.getElementById('errorBox').style.display = 'block';
+  document.getElementById('errorBox').innerHTML =
+    '<span class="error-msg">&#10060; No decryption key found in URL.<br>'
+    + 'Make sure you opened the complete share link.</span>';
+} else if (SINGLE_DOWNLOAD) {
+  document.getElementById('warnName').textContent = FILENAME;
+  document.getElementById('warning').style.display = 'block';
+  document.getElementById('viewBtn').addEventListener('click', decryptAndView);
+} else {
+  decryptAndView();
+}
+
+async function decryptAndView() {
+  document.getElementById('warning').style.display = 'none';
+  document.getElementById('loading').style.display = 'block';
+  try {
+    const res = await fetch('/' + TOKEN);
+    if (!res.ok) {
+      document.getElementById('loading').style.display = 'none';
+      document.getElementById('errorBox').style.display = 'block';
+      document.getElementById('errorBox').innerHTML =
+        '<span class="error-msg">&#10060; File not found or link has expired.</span>';
+      return;
+    }
+    const raw = await res.arrayBuffer();
+
+    // Reconstruct the AES-GCM key from the URL fragment
+    const keyBytes = Uint8Array.from(atob(keyB64), c => c.charCodeAt(0));
+    const key = await crypto.subtle.importKey(
+      'raw', keyBytes, 'AES-GCM', false, ['decrypt']
+    );
+
+    // Decrypt frame by frame: [4-byte BE length][12-byte IV][ciphertext]
+    const view = new DataView(raw);
+    const decrypted = [];
+    let pos = 0;
+    while (pos < raw.byteLength) {
+      const len = view.getUint32(pos);        pos += 4;
+      const iv  = new Uint8Array(raw, pos, 12); pos += 12;
+      const ct  = new Uint8Array(raw, pos, len); pos += len;
+      const pt  = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct);
+      decrypted.push(new Uint8Array(pt));
+    }
+
+    // Decode decrypted content as text
+    const blob = new Blob(decrypted);
+    blobUrl = URL.createObjectURL(blob);
+    const text = await blob.text();
+    document.getElementById('textContent').textContent = text;
+    document.getElementById('fname').textContent = FILENAME;
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('textArea').style.display = 'block';
+    if (SINGLE_DOWNLOAD)
+      document.getElementById('consumed').style.display = 'block';
+  } catch (err) {
+    document.getElementById('loading').style.display = 'none';
+    document.getElementById('errorBox').style.display = 'block';
+    document.getElementById('errorBox').innerHTML =
+      '<span class="error-msg">&#10060; Decryption failed: ' + err.message + '</span>';
+  }
+}
+
+document.getElementById('saveBtn').addEventListener('click', function() {
+  if (!blobUrl) return;
+  const a = document.createElement('a');
+  a.href = blobUrl;
+  a.download = FILENAME;
+  document.body.appendChild(a);
+  a.click();
+  setTimeout(function() { a.remove(); }, 100);
+});
+</script>
+</body>
+</html>
+)html";
+}
+
+/// Generate the image viewer HTML page with embedded metadata.
+std::string image_viewer_html(const std::string& token,
+                                      const std::string& filename,
+                                      bool single_download,
+                                      const std::string& base_url = "") {
+    // Escape filename for safe embedding in a JS single-quoted string
+    std::string js_name;
+    js_name.reserve(filename.size());
+    for (char c : filename) {
+        switch (c) {
+            case '\\': js_name += "\\\\"; break;
+            case '\'': js_name += "\\'";  break;
+            case '"':  js_name += "\\\""; break;
+            case '\n': js_name += "\\n";  break;
+            case '\r': js_name += "\\r";  break;
+            case '<':  js_name += "\\x3c"; break;
+            case '>':  js_name += "\\x3e"; break;
+            default:   js_name += c;
+        }
+    }
+
+    std::string sd = single_download ? "true" : "false";
+
+    // Build OG meta block — for images, og:image points to the raw download URL
+    // so WhatsApp/Telegram/Slack can render a real thumbnail.
+    std::string og_image = base_url.empty() ? "" : base_url + "/" + token;
+    std::string og_url   = base_url.empty() ? "" : base_url + "/v/" + token;
+    std::string og_desc  = "View " + filename + " shared via Share2Me.";
+    std::string og_meta  =
+        "<meta name=\"description\" content=\"" + og_desc + "\" />\n"
+        "<meta property=\"og:type\"        content=\"website\" />\n"
+        "<meta property=\"og:site_name\"   content=\"Share2Me\" />\n"
+        "<meta property=\"og:title\"       content=\"Share2Me \xe2\x80\x93 " + filename + "\" />\n"
+        "<meta property=\"og:description\" content=\"" + og_desc + "\" />\n"
+        + (og_image.empty() ? "" :
+            "<meta property=\"og:image\"       content=\"" + og_image + "\" />\n")
+        + (og_url.empty() ? "" :
+            "<meta property=\"og:url\"         content=\"" + og_url + "\" />\n")
+        + "<meta name=\"twitter:card\"        content=\"summary_large_image\" />\n"
+          "<meta name=\"twitter:title\"       content=\"Share2Me \xe2\x80\x93 " + filename + "\" />\n"
+          "<meta name=\"twitter:description\" content=\"" + og_desc + "\" />\n"
+        + (og_image.empty() ? "" :
+            "<meta name=\"twitter:image\"       content=\"" + og_image + "\" />\n");
+
+    return R"html(<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Share2Me &#8211; View</title>
+)html" + og_meta + R"html(<style>
   :root {
     --bg: #0f172a; --surface: #1e293b; --border: #334155;
     --text: #e2e8f0; --accent: #38bdf8; --accent-hover: #7dd3fc;
@@ -611,8 +1095,22 @@ if (SINGLE_DOWNLOAD) {
 /// Generate the E2EE image viewer HTML page.
 /// The AES key and original filename arrive via the URL fragment (#k=...&n=...).
 std::string encrypted_image_viewer_html(const std::string& token,
-                                         bool single_download) {
+                                         bool single_download,
+                                         const std::string& base_url = "") {
     std::string sd = single_download ? "true" : "false";
+    std::string og_url  = base_url.empty() ? "" : base_url + "/v/" + token;
+    std::string og_desc = "View this encrypted image shared via Share2Me. The decryption key is only in the link.";
+    std::string og_meta =
+        "<meta name=\"description\" content=\"" + og_desc + "\" />\n"
+        "<meta property=\"og:type\"        content=\"website\" />\n"
+        "<meta property=\"og:site_name\"   content=\"Share2Me\" />\n"
+        "<meta property=\"og:title\"       content=\"Share2Me \xe2\x80\x93 Encrypted image\" />\n"
+        "<meta property=\"og:description\" content=\"" + og_desc + "\" />\n"
+        + (og_url.empty() ? "" :
+            "<meta property=\"og:url\"         content=\"" + og_url + "\" />\n")
+        + "<meta name=\"twitter:card\"        content=\"summary\" />\n"
+          "<meta name=\"twitter:title\"       content=\"Share2Me \xe2\x80\x93 Encrypted image\" />\n"
+          "<meta name=\"twitter:description\" content=\"" + og_desc + "\" />\n";
 
     return R"html(<!DOCTYPE html>
 <html lang="en">
@@ -620,7 +1118,7 @@ std::string encrypted_image_viewer_html(const std::string& token,
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Share2Me &#8211; Encrypted View</title>
-<style>
+)html" + og_meta + R"html(<style>
   :root {
     --bg: #0f172a; --surface: #1e293b; --border: #334155;
     --text: #e2e8f0; --accent: #38bdf8; --accent-hover: #7dd3fc;
