@@ -1,11 +1,8 @@
-#pragma once
+#include "mime.hpp"
 
 #include <filesystem>
-#include <string>
 #include <unordered_map>
 
-/// Guess a Content-Type from the file extension.
-/// Falls back to application/octet-stream for unknown types.
 std::string mime_for(const std::string& filename) {
     static const std::unordered_map<std::string, std::string> mimes = {
         // Text / web

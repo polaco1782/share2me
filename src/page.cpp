@@ -1,8 +1,7 @@
-#pragma once
+#include "page.hpp"
 
-#include <string>
 
-static constexpr const char* INDEX_HTML = R"html(
+const char* const INDEX_HTML = R"html(
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -289,7 +288,7 @@ static constexpr const char* INDEX_HTML = R"html(
 </html>
 )html";
 
-static constexpr const char* DECRYPT_PAGE_HTML = R"html(
+const char* const DECRYPT_PAGE_HTML = R"html(
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -443,7 +442,7 @@ async function decryptAndDownload(token, keyB64, filename) {
 std::string text_viewer_html(const std::string& token,
                              const std::string& filename,
                              bool single_download,
-                             const std::string& base_url = "") {
+                             const std::string& base_url) {
     // Escape filename for safe embedding in a JS single-quoted string
     std::string js_name;
     js_name.reserve(filename.size());
@@ -650,7 +649,7 @@ if (SINGLE_DOWNLOAD) {
 /// The AES key and original filename arrive via the URL fragment (#k=...&n=...).
 std::string encrypted_text_viewer_html(const std::string& token,
                                        bool single_download,
-                                       const std::string& base_url = "") {
+                                       const std::string& base_url) {
     std::string sd = single_download ? "true" : "false";
     std::string og_url  = base_url.empty() ? "" : base_url + "/v/" + token;
     std::string og_desc = "View this encrypted file shared via Share2Me. The decryption key is only in the link.";
@@ -888,7 +887,7 @@ document.getElementById('saveBtn').addEventListener('click', function() {
 std::string image_viewer_html(const std::string& token,
                                       const std::string& filename,
                                       bool single_download,
-                                      const std::string& base_url = "") {
+                                      const std::string& base_url) {
     // Escape filename for safe embedding in a JS single-quoted string
     std::string js_name;
     js_name.reserve(filename.size());
@@ -1096,7 +1095,7 @@ if (SINGLE_DOWNLOAD) {
 /// The AES key and original filename arrive via the URL fragment (#k=...&n=...).
 std::string encrypted_image_viewer_html(const std::string& token,
                                          bool single_download,
-                                         const std::string& base_url = "") {
+                                         const std::string& base_url) {
     std::string sd = single_download ? "true" : "false";
     std::string og_url  = base_url.empty() ? "" : base_url + "/v/" + token;
     std::string og_desc = "View this encrypted image shared via Share2Me. The decryption key is only in the link.";

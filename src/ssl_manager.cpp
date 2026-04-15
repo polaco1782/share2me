@@ -1,24 +1,20 @@
-#pragma once
+#include "ssl_manager.hpp"
 
 #include <openssl/asn1.h>
 #include <openssl/err.h>
 #include <openssl/evp.h>
 #include <openssl/pem.h>
+#include <openssl/rand.h>
 #include <openssl/x509.h>
 #include <openssl/x509v3.h>
 
-#include <openssl/rand.h>
-
 #include <cstdint>
-#include <filesystem>
 #include <stdexcept>
 #include <string>
 
 namespace ssl_mgr {
 
-namespace fs = std::filesystem;
-
-namespace detail {
+namespace {
 
 /// Collect and return the latest OpenSSL error string.
 std::string last_error() {
@@ -42,19 +38,21 @@ using PkeyGuard = Guard<EVP_PKEY, EVP_PKEY_free>;
 using X509Guard = Guard<X509,     X509_free>;
 using ExtGuard  = Guard<X509_EXTENSION, X509_EXTENSION_free>;
 
-} // namespace detail
+} // anonymous namespace
+
+namespace fs = std::filesystem;
 
 void generate_self_signed_cert(
     const fs::path& cert_path,
     const fs::path& key_path,
-    const std::string& cn = "localhost",
-    int days = 3650)
+    const std::string& cn,
+    int days)
 {
-    detail::PkeyGuard pkey{ EVP_RSA_gen(2048) };
+    PkeyGuard pkey{ EVP_RSA_gen(2048) };
     if (!pkey)
-        throw std::runtime_error("EVP_RSA_gen failed: " + detail::last_error());
+        throw std::runtime_error("EVP_RSA_gen failed: " + last_error());
 
-    detail::X509Guard cert{ X509_new() };
+    X509Guard cert{ X509_new() };
     if (!cert)
         throw std::runtime_error("X509_new failed");
 
@@ -92,21 +90,21 @@ void generate_self_signed_cert(
     san += ",IP:127.0.0.1";
 
     {
-        detail::ExtGuard ext{
+        ExtGuard ext{
             X509V3_EXT_conf_nid(nullptr, &v3ctx, NID_subject_alt_name, san.c_str())
         };
         if (ext) X509_add_ext(cert, ext, -1);
     }
 
     {
-        detail::ExtGuard ext{
+        ExtGuard ext{
             X509V3_EXT_conf_nid(nullptr, &v3ctx, NID_basic_constraints, "CA:FALSE")
         };
         if (ext) X509_add_ext(cert, ext, -1);
     }
 
     {
-        detail::ExtGuard ext{
+        ExtGuard ext{
             X509V3_EXT_conf_nid(nullptr, &v3ctx, NID_key_usage,
                                 "digitalSignature,keyEncipherment")
         };
@@ -114,7 +112,7 @@ void generate_self_signed_cert(
     }
 
     if (!X509_sign(cert, pkey, EVP_sha256()))
-        throw std::runtime_error("X509_sign failed: " + detail::last_error());
+        throw std::runtime_error("X509_sign failed: " + last_error());
 
     {
         if (auto parent = key_path.parent_path(); !parent.empty())
@@ -145,13 +143,13 @@ void generate_self_signed_cert(
     }
 }
 
-bool needs_renewal(const fs::path& cert_path, int threshold_days = 30) {
+bool needs_renewal(const fs::path& cert_path, int threshold_days) {
     if (!fs::exists(cert_path)) return true;
 
     FILE* f = fopen(cert_path.string().c_str(), "r");
     if (!f) return true;
 
-    detail::X509Guard cert{ PEM_read_X509(f, nullptr, nullptr, nullptr) };
+    X509Guard cert{ PEM_read_X509(f, nullptr, nullptr, nullptr) };
     fclose(f);
     if (!cert) return true;
 
@@ -163,8 +161,8 @@ bool needs_renewal(const fs::path& cert_path, int threshold_days = 30) {
 bool ensure_certificates(
     const fs::path& cert_path,
     const fs::path& key_path,
-    const std::string& cn = "localhost",
-    int renewal_threshold_days = 30)
+    const std::string& cn,
+    int renewal_threshold_days)
 {
     if (fs::exists(cert_path) && fs::exists(key_path) &&
         !needs_renewal(cert_path, renewal_threshold_days))

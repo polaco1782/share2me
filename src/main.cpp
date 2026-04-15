@@ -1,11 +1,15 @@
-#include "config.hpp"
-#include "routes.hpp"
 #include "cert_manager.hpp"
+#include "config.hpp"
 #include "housekeeper.hpp"
+#include "logging.hpp"
+#include "routes.hpp"
 #include "sandbox.hpp"
+#include "store.hpp"
 #include "tls_util.hpp"
 
-#include <crow.h>
+#include <httplib.h>
+#include <nlohmann/json.hpp>
+#include <openssl/ssl.h>
 
 #include <chrono>
 #include <filesystem>
@@ -22,12 +26,14 @@ namespace fs = std::filesystem;
 int main(int argc, char* argv[]) {
 
     AppConfig cfg = parse_args(argc, argv);
-    fs::create_directories(DATA_DIR);
+
+    FileStore store("data");
+    store.create_directories();
+
     std::mutex acme_mutex;
     std::unordered_map<std::string, std::string> acme_challenges;
+
     // Restore any ACME challenges that were persisted before a restart.
-    // This closes the window where a restart during the validation handshake
-    // would cause the challenge HTTP response to return 404.
     try {
         std::ifstream ifs("acme_work/challenges.json");
         if (ifs) {
@@ -36,23 +42,19 @@ int main(int argc, char* argv[]) {
             for (auto& [k, v] : j.items())
                 acme_challenges[k] = v.get<std::string>();
             if (!acme_challenges.empty())
-                CROW_LOG_INFO << "Restored " << acme_challenges.size()
-                              << " persisted ACME challenge(s)";
+                LOG_INFO << "Restored " << acme_challenges.size()
+                         << " persisted ACME challenge(s)";
         }
     } catch (...) {}
-    crow::SimpleApp http_app;
+
+    httplib::Server http_app;
     std::thread http_thread;
 
-    http_app.loglevel(crow::LogLevel::Info);
-    register_http_routes(http_app, cfg.domain, cfg.https_port,
-                         acme_mutex, acme_challenges);
+    register_http_routes(http_app, cfg, acme_mutex, acme_challenges);
 
     if (cfg.http_port > 0) {
         http_thread = std::thread([&] {
-            http_app.port(cfg.http_port)
-                .bindaddr("::")
-                .multithreaded()
-                .run();
+            http_app.listen("::", cfg.http_port);
         });
         // Give the HTTP server a moment to bind before ACME starts.
         std::this_thread::sleep_for(std::chrono::milliseconds(300));
@@ -62,7 +64,7 @@ int main(int argc, char* argv[]) {
         throw std::runtime_error(
             "--acme requires an HTTP port (--http-port must be > 0)");
 
-    cert_mgr::CertConfig cert_cfg{
+    CertManager cert_mgr({
         .cert_path    = cfg.cert_path,
         .key_path     = cfg.key_path,
         .domain       = cfg.domain,
@@ -70,15 +72,15 @@ int main(int argc, char* argv[]) {
         .acme_email   = cfg.acme_email,
         .acme_staging = cfg.acme_staging,
         .acme_verbose = cfg.acme_verbose,
-    };
+    });
 
-    cert_mgr::provision_certificates(cert_cfg, acme_mutex, acme_challenges);
+    cert_mgr.provision(acme_mutex, acme_challenges);
 
     auto tls = tls_util::load_files(cfg.cert_path, cfg.key_path);
 
     if ((cfg.sandbox_mode || !cfg.drop_user.empty()) && ::geteuid() != 0) {
-        CROW_LOG_ERROR << "--sandbox / --user require root privileges "
-                          "(run with sudo or grant CAP_SYS_CHROOT + CAP_SETUID)";
+        LOG_ERROR << "--sandbox / --user require root privileges "
+                     "(run with sudo or grant CAP_SYS_CHROOT + CAP_SETUID)";
         return 1;
     }
 
@@ -87,24 +89,24 @@ int main(int argc, char* argv[]) {
         try {
             jail_user = sandbox::lookup_user(cfg.drop_user);
         } catch (const std::exception& ex) {
-            CROW_LOG_ERROR << "Cannot resolve --user '" << cfg.drop_user
-                           << "': " << ex.what();
+            LOG_ERROR << "Cannot resolve --user '" << cfg.drop_user
+                      << "': " << ex.what();
             return 1;
         }
     }
 
     if (cfg.sandbox_mode) {
-        const fs::path jail_abs = fs::absolute(DATA_DIR);
+        const fs::path jail_abs = fs::absolute(store.data_dir());
         try {
             if (jail_user)
                 sandbox::chown_jail(jail_abs, *jail_user);
 
-            CROW_LOG_INFO << "Entering chroot jail: " << jail_abs;
+            LOG_INFO << "Entering chroot jail: " << jail_abs;
             sandbox::enter_chroot(jail_abs);
-            DATA_DIR = "/";  // inside the jail all data lives at the root
-            CROW_LOG_INFO << "Jailed; file root is now the jail root";
+            store.set_data_dir("/");
+            LOG_INFO << "Jailed; file root is now the jail root";
         } catch (const std::exception& ex) {
-            CROW_LOG_ERROR << "Sandbox setup failed: " << ex.what();
+            LOG_ERROR << "Sandbox setup failed: " << ex.what();
             return 1;
         }
     }
@@ -112,46 +114,81 @@ int main(int argc, char* argv[]) {
     if (jail_user) {
         try {
             sandbox::drop_privileges(*jail_user);
-            CROW_LOG_INFO << "Privileges dropped to " << cfg.drop_user
-                          << " (uid=" << jail_user->uid
-                          << ", gid=" << jail_user->gid << ")";
+            LOG_INFO << "Privileges dropped to " << cfg.drop_user
+                     << " (uid=" << jail_user->uid
+                     << ", gid=" << jail_user->gid << ")";
         } catch (const std::exception& ex) {
-            CROW_LOG_ERROR << "Privilege drop failed: " << ex.what();
+            LOG_ERROR << "Privilege drop failed: " << ex.what();
             return 1;
         }
     }
 
-    crow::SimpleApp app;
-    app.loglevel(crow::LogLevel::Info);
-    register_routes(app, cfg);
+    // Build the SSL context via httplib's callback.
+    SSL_CTX* live_ssl_ctx = nullptr;
 
-    auto ssl_ctx = tls_util::create_ssl_context(tls);
+    httplib::SSLServer app(
+        [&tls, &live_ssl_ctx](SSL_CTX& ctx) -> bool {
+            try {
+                BIO* cert_bio = BIO_new_mem_buf(tls.cert_pem.data(),
+                    static_cast<int>(tls.cert_pem.size()));
+                if (!cert_bio) return false;
+                X509* cert = PEM_read_bio_X509(cert_bio, nullptr, nullptr, nullptr);
+                if (!cert) { BIO_free(cert_bio); return false; }
+                if (SSL_CTX_use_certificate(&ctx, cert) != 1) {
+                    X509_free(cert); BIO_free(cert_bio); return false;
+                }
+                X509_free(cert);
+                while (true) {
+                    X509* chain_cert = PEM_read_bio_X509(cert_bio, nullptr, nullptr, nullptr);
+                    if (!chain_cert) break;
+                    SSL_CTX_add_extra_chain_cert(&ctx, chain_cert);
+                }
+                BIO_free(cert_bio);
 
-    // Grab the native SSL_CTX* before moving ownership into Crow.
-    // The pointer stays valid for the lifetime of the Crow app.
-    SSL_CTX* live_ssl_ctx = ssl_ctx.native_handle();
+                BIO* key_bio = BIO_new_mem_buf(tls.key_pem.data(),
+                    static_cast<int>(tls.key_pem.size()));
+                if (!key_bio) return false;
+                EVP_PKEY* pkey = PEM_read_bio_PrivateKey(key_bio, nullptr, nullptr, nullptr);
+                BIO_free(key_bio);
+                if (!pkey) return false;
+                if (SSL_CTX_use_PrivateKey(&ctx, pkey) != 1) {
+                    EVP_PKEY_free(pkey); return false;
+                }
+                EVP_PKEY_free(pkey);
 
-    housekeeper::start_housekeeper_thread();
+                if (SSL_CTX_check_private_key(&ctx) != 1) return false;
+
+                OPENSSL_cleanse(tls.key_pem.data(), tls.key_pem.size());
+                tls.key_pem.clear();
+
+                SSL_CTX_set_min_proto_version(&ctx, TLS1_2_VERSION);
+
+                live_ssl_ctx = &ctx;
+                return true;
+            } catch (...) {
+                return false;
+            }
+        });
+
+    register_routes(app, cfg, store);
+
+    Housekeeper housekeeper(store);
+    housekeeper.start();
 
     if (!cfg.sandbox_mode) {
-        cert_mgr::start_renewal_thread(cert_cfg, acme_mutex, acme_challenges,
-                                       live_ssl_ctx);
+        cert_mgr.start_renewal(acme_mutex, acme_challenges, live_ssl_ctx);
     } else {
-        CROW_LOG_WARNING << "Cert renewal thread skipped in sandbox mode "
-                            "(cert files are outside the chroot jail)";
+        LOG_WARNING << "Cert renewal thread skipped in sandbox mode "
+                       "(cert files are outside the chroot jail)";
     }
 
-    CROW_LOG_INFO << "Share2Me (HTTPS) listening on " << cfg.https_port
-                  << "  |  HTTP redirect on " << cfg.http_port;
+    LOG_INFO << "Share2Me (HTTPS) listening on " << cfg.https_port
+             << "  |  HTTP redirect on " << cfg.http_port;
 
-    app.port(cfg.https_port)
-        .bindaddr("::")
-        .ssl(std::move(ssl_ctx))
-        .multithreaded()
-        .run();
+    app.listen("::", cfg.https_port);
 
-    cert_mgr::stop_renewal_thread();
-    housekeeper::stop_housekeeper_thread();
+    cert_mgr.stop_renewal();
+    housekeeper.stop();
 
     if (cfg.http_port > 0) {
         http_app.stop();
