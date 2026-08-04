@@ -42,7 +42,7 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
 
       - name: Build static release binary
-        run: cargo build --release --locked --target x86_64-unknown-linux-musl
+        run: ./scripts/build-static.sh
 
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4

@@ -49,13 +49,14 @@ pick.addEventListener('drop',e=>{e.preventDefault();if(e.dataTransfer.files.leng
 
 async function encryptFile(file){
   const key=await crypto.subtle.generateKey({name:'AES-GCM',length:256},true,['encrypt','decrypt']);
-  const parts=[],chunkSize=1024*1024;
+  const chunkSize=1024*1024,chunkCount=Math.ceil(file.size/chunkSize),header=new Uint8Array(16),headerView=new DataView(header.buffer),parts=[header];
+  header.set([83,50,77,49]);headerView.setBigUint64(4,BigInt(file.size),false);headerView.setUint32(12,chunkCount,false);let chunkIndex=0;
   for(let offset=0;offset<file.size;offset+=chunkSize){
     const plain=await file.slice(offset,offset+chunkSize).arrayBuffer();
-    const iv=crypto.getRandomValues(new Uint8Array(12));
-    const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv},key,plain);
+    const iv=crypto.getRandomValues(new Uint8Array(12)),aad=new Uint8Array(20);aad.set(header);new DataView(aad.buffer).setUint32(16,chunkIndex,false);
+    const encrypted=await crypto.subtle.encrypt({name:'AES-GCM',iv,additionalData:aad},key,plain);
     const frame=new Uint8Array(16+encrypted.byteLength);
-    new DataView(frame.buffer).setUint32(0,encrypted.byteLength,false);frame.set(iv,4);frame.set(new Uint8Array(encrypted),16);parts.push(frame);
+    new DataView(frame.buffer).setUint32(0,encrypted.byteLength,false);frame.set(iv,4);frame.set(new Uint8Array(encrypted),16);parts.push(frame);chunkIndex++;
   }
   const raw=new Uint8Array(await crypto.subtle.exportKey('raw',key));
   return {blob:new Blob(parts,{type:'application/octet-stream'}),key:btoa(String.fromCharCode(...raw))};
@@ -85,7 +86,11 @@ form.addEventListener('submit',async event=>{
 </body>
 </html>"#;
 
-pub const DECRYPT_PAGE_HTML: &str = r#"<!doctype html>
+pub fn decrypt_page_html() -> String {
+    DECRYPT_PAGE_HTML.replace("__DECRYPT_FUNCTION__", DECRYPT_FUNCTION_JS)
+}
+
+const DECRYPT_PAGE_HTML: &str = r#"<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Share2Me – Decrypt</title>
 <style>:root{color-scheme:dark}*{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0f172a;color:#e2e8f0;font:15px/1.5 system-ui,sans-serif;padding:20px}.card{width:min(520px,100%);background:#1e293b;border:1px solid #334155;border-radius:14px;padding:32px;text-align:center}.muted{color:#94a3b8}.error{color:#f87171}button{padding:12px 22px;border:0;border-radius:10px;background:#38bdf8;color:#082f49;font-weight:700;cursor:pointer}a{color:#38bdf8}</style></head>
 <body><main class="card"><h1>🔒 Share2Me</h1><p class="muted">End-to-end encrypted download</p><p id="name"></p><button id="download">Decrypt &amp; Download</button><p id="status" class="muted" aria-live="polite"></p><p><a href="/">← Upload another file</a></p></main>
@@ -93,12 +98,7 @@ pub const DECRYPT_PAGE_HTML: &str = r#"<!doctype html>
 const params=new URLSearchParams(location.hash.slice(1)),keyText=params.get('k');
 const requested=params.get('n')||'download',filename=(requested.split(/[\\/]/).pop()||'download').replace(/[\u0000-\u001f\u007f]/g,'');
 document.querySelector('#name').textContent=filename;
-async function decrypt(raw,keyText){
-  const keyBytes=Uint8Array.from(atob(keyText),c=>c.charCodeAt(0));if(keyBytes.length!==32)throw new Error('Invalid decryption key');
-  const key=await crypto.subtle.importKey('raw',keyBytes,'AES-GCM',false,['decrypt']);const view=new DataView(raw),parts=[];let pos=0;
-  while(pos<raw.byteLength){if(raw.byteLength-pos<16)throw new Error('Invalid encrypted file framing');const length=view.getUint32(pos,false);pos+=4;const iv=new Uint8Array(raw,pos,12);pos+=12;if(length<16||length>raw.byteLength-pos)throw new Error('Invalid encrypted chunk length');const ciphertext=new Uint8Array(raw,pos,length);pos+=length;parts.push(new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv},key,ciphertext)))}
-  return new Blob(parts);
-}
+__DECRYPT_FUNCTION__
 const button=document.querySelector('#download'),status=document.querySelector('#status');if(!keyText){button.disabled=true;status.className='error';status.textContent='The decryption key is missing from the URL.'}
 button.addEventListener('click',async()=>{button.disabled=true;status.textContent='Fetching and decrypting…';try{const response=await fetch('/'+location.pathname.split('/').pop());if(!response.ok)throw new Error('File not found or link expired');const blob=await decrypt(await response.arrayBuffer(),keyText);const url=URL.createObjectURL(blob),link=document.createElement('a');link.href=url;link.download=filename;document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),30000);status.textContent='Decrypted. Your download has started.'}catch(error){status.className='error';status.textContent=error instanceof Error?error.message:'Decryption failed'}finally{button.disabled=false}});
 </script></body></html>"#;
@@ -140,6 +140,7 @@ pub fn viewer_html(
                 ViewerKind::Image => "image",
             }),
         )
+        .replace("__DECRYPT_FUNCTION__", DECRYPT_FUNCTION_JS)
 }
 
 const VIEWER_HTML: &str = r#"<!doctype html>
@@ -151,10 +152,20 @@ const TOKEN=__TOKEN__,SERVER_FILENAME=__FILENAME__,SINGLE=__SINGLE__,ENCRYPTED=_
 const fragment=new URLSearchParams(location.hash.slice(1)),requested=ENCRYPTED?(fragment.get('n')||'download'):SERVER_FILENAME;
 const filename=(requested.split(/[\\/]/).pop()||'download').replace(/[\u0000-\u001f\u007f]/g,'');document.querySelector('#filename').textContent=filename;
 function mimeFor(name){const ext=(name.split('.').pop()||'').toLowerCase(),map={png:'image/png',jpg:'image/jpeg',jpeg:'image/jpeg',gif:'image/gif',webp:'image/webp',svg:'image/svg+xml',bmp:'image/bmp',avif:'image/avif',ico:'image/x-icon',tif:'image/tiff',tiff:'image/tiff'};return map[ext]||(KIND==='text'?'text/plain;charset=utf-8':'application/octet-stream')}
-async function decrypt(raw,keyText){const keyBytes=Uint8Array.from(atob(keyText),c=>c.charCodeAt(0));if(keyBytes.length!==32)throw new Error('Invalid decryption key');const key=await crypto.subtle.importKey('raw',keyBytes,'AES-GCM',false,['decrypt']);const view=new DataView(raw),parts=[];let pos=0;while(pos<raw.byteLength){if(raw.byteLength-pos<16)throw new Error('Invalid encrypted file framing');const length=view.getUint32(pos,false);pos+=4;const iv=new Uint8Array(raw,pos,12);pos+=12;if(length<16||length>raw.byteLength-pos)throw new Error('Invalid encrypted chunk length');const ciphertext=new Uint8Array(raw,pos,length);pos+=length;parts.push(new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv},key,ciphertext)))}return new Blob(parts,{type:mimeFor(filename)})}
-let blobUrl=null;async function load(){const status=document.querySelector('#status');status.textContent=ENCRYPTED?'Fetching and decrypting…':'Loading…';try{const response=await fetch('/'+TOKEN);if(!response.ok)throw new Error('File not found or link expired');let blob;if(ENCRYPTED){const key=fragment.get('k');if(!key)throw new Error('The decryption key is missing from the URL');blob=await decrypt(await response.arrayBuffer(),key)}else blob=await response.blob();blobUrl=URL.createObjectURL(blob);if(KIND==='text'){document.querySelector('#text').textContent=await blob.text();document.querySelector('#text').classList.remove('hidden')}else{document.querySelector('#image').src=blobUrl;document.querySelector('#image').classList.remove('hidden')}status.classList.add('hidden');document.querySelector('#content').classList.remove('hidden')}catch(error){status.className='error';status.textContent=error instanceof Error?error.message:'Unable to load file'}}
+__DECRYPT_FUNCTION__
+let blobUrl=null;async function load(){const status=document.querySelector('#status');status.textContent=ENCRYPTED?'Fetching and decrypting…':'Loading…';try{const response=await fetch('/'+TOKEN);if(!response.ok)throw new Error('File not found or link expired');let blob;if(ENCRYPTED){const key=fragment.get('k');if(!key)throw new Error('The decryption key is missing from the URL');blob=await decrypt(await response.arrayBuffer(),key,mimeFor(filename))}else blob=await response.blob();blobUrl=URL.createObjectURL(blob);if(KIND==='text'){document.querySelector('#text').textContent=await blob.text();document.querySelector('#text').classList.remove('hidden')}else{document.querySelector('#image').src=blobUrl;document.querySelector('#image').classList.remove('hidden')}status.classList.add('hidden');document.querySelector('#content').classList.remove('hidden')}catch(error){status.className='error';status.textContent=error instanceof Error?error.message:'Unable to load file'}}
 document.querySelector('#save').addEventListener('click',()=>{if(!blobUrl)return;const link=document.createElement('a');link.href=blobUrl;link.download=filename;document.body.append(link);link.click();link.remove()});if(SINGLE){document.querySelector('#status').classList.add('hidden');document.querySelector('#warning').classList.remove('hidden');document.querySelector('#open').addEventListener('click',()=>{document.querySelector('#warning').classList.add('hidden');document.querySelector('#status').classList.remove('hidden');load()})}else load();
 </script></body></html>"#;
+
+const DECRYPT_FUNCTION_JS: &str = r"async function decrypt(raw,keyText,mime=''){
+  const keyBytes=Uint8Array.from(atob(keyText),c=>c.charCodeAt(0));if(keyBytes.length!==32)throw new Error('Invalid decryption key');
+  if(raw.byteLength<16)throw new Error('Invalid encrypted file header');const view=new DataView(raw),header=new Uint8Array(raw,0,16);
+  if(header[0]!==83||header[1]!==50||header[2]!==77||header[3]!==49)throw new Error('Unsupported encrypted file format');
+  const expectedSize=Number(view.getBigUint64(4,false)),expectedChunks=view.getUint32(12,false);if(!Number.isSafeInteger(expectedSize)||expectedSize>512*1024*1024)throw new Error('Invalid encrypted file size');
+  const key=await crypto.subtle.importKey('raw',keyBytes,'AES-GCM',false,['decrypt']),parts=[];let pos=16,chunkIndex=0,totalSize=0;
+  while(pos<raw.byteLength){if(chunkIndex>=expectedChunks||raw.byteLength-pos<16)throw new Error('Invalid encrypted file framing');const length=view.getUint32(pos,false);pos+=4;const iv=new Uint8Array(raw,pos,12);pos+=12;if(length<16||length>raw.byteLength-pos)throw new Error('Invalid encrypted chunk length');const ciphertext=new Uint8Array(raw,pos,length);pos+=length;const aad=new Uint8Array(20);aad.set(header);new DataView(aad.buffer).setUint32(16,chunkIndex,false);const plain=new Uint8Array(await crypto.subtle.decrypt({name:'AES-GCM',iv,additionalData:aad},key,ciphertext));totalSize+=plain.byteLength;if(totalSize>expectedSize)throw new Error('Invalid encrypted file size');parts.push(plain);chunkIndex++}
+  if(chunkIndex!==expectedChunks||totalSize!==expectedSize)throw new Error('Encrypted file is incomplete');return new Blob(parts,{type:mime});
+}";
 
 fn json_for_script(value: &str) -> String {
     json!(value)
@@ -191,5 +202,14 @@ mod tests {
         );
         assert!(!page.contains("</script><script>alert(1)"));
         assert!(page.contains("\\u003c/script\\u003e"));
+        assert!(!page.contains("__DECRYPT_FUNCTION__"));
+    }
+
+    #[test]
+    fn decrypt_pages_share_the_authenticated_chunk_format() {
+        let page = decrypt_page_html();
+        assert!(!page.contains("__DECRYPT_FUNCTION__"));
+        assert!(page.contains("Unsupported encrypted file format"));
+        assert!(page.contains("additionalData:aad"));
     }
 }

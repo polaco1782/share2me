@@ -64,16 +64,7 @@ async fn run() -> Result<()> {
         })
     });
 
-    let certificate_config = CertificateConfig {
-        cert_path: config.cert.clone(),
-        key_path: config.key.clone(),
-        domain: config.domain.clone(),
-        use_acme: config.acme,
-        email: config.email.clone(),
-        staging: config.staging,
-        verbose: config.acme_verbose,
-        work_dir: "acme_work".into(),
-    };
+    let certificate_config = certificate_config(&config);
     certificates::provision(&certificate_config, &challenges, 3).await?;
     let tls = RustlsConfig::from_pem_file(&config.cert, &config.key)
         .await
@@ -144,6 +135,19 @@ async fn run() -> Result<()> {
         None => secure_task.await.context("joining HTTPS server task")??,
     }
     Ok(())
+}
+
+fn certificate_config(config: &AppConfig) -> CertificateConfig {
+    CertificateConfig {
+        cert_path: config.cert.clone(),
+        key_path: config.key.clone(),
+        domain: config.domain.clone(),
+        use_acme: config.acme,
+        email: config.email.clone(),
+        staging: config.staging,
+        verbose: config.acme_verbose,
+        work_dir: "acme_work".into(),
+    }
 }
 
 fn bind_listener(port: u16, label: &str) -> Result<TcpListener> {

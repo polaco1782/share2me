@@ -6,6 +6,12 @@ Share2Me is a small self-hosted file-sharing server. It serves a browser UI and 
 
 The server is implemented in safe Rust. The crate forbids application `unsafe` code, bounds every request body, streams uploads and downloads, and uses Rustls for TLS.
 
+## Why Share2Me moved to Rust
+
+Share2Me was originally implemented in C++. Because the server accepts untrusted uploads and is intended to face the public internet, it was ported to Rust to reduce its exposure to memory-safety vulnerabilities such as buffer overflows, use-after-free errors, and invalid memory access. Rust's ownership and type systems prevent these broad bug classes in the application code while retaining native performance.
+
+Rust is not a substitute for security controls, so the port also validates untrusted input, limits resource use, streams large bodies, verifies stored content, applies restrictive browser headers, and supports privilege dropping and chroot isolation.
+
 ## Features
 
 - Browser and command-line uploads, up to 512 MiB per file.
@@ -31,13 +37,33 @@ See the [latest release](../../releases/latest).
 
 ## Building from source
 
-Install Rust 1.88 or newer, then run:
+Install Rust 1.88 or newer. For a normal build on the current machine, run:
 
 ```bash
 cargo build --release --locked
 ```
 
-The executable is `target/release/share2me`. The checked-in `Cargo.lock` keeps application builds reproducible.
+The executable is `target/release/share2me`. This native build can depend on the build machine's glibc and should not be copied to an older Linux distribution.
+
+For a portable, fully static Linux x86-64 binary, install the musl target and native compiler prerequisites:
+
+```bash
+rustup target add x86_64-unknown-linux-musl
+
+# Fedora
+sudo dnf install clang musl-devel musl-libc-static
+
+# Debian/Ubuntu
+sudo apt-get install musl-tools
+```
+
+Then use the repository build script:
+
+```bash
+./scripts/build-static.sh
+```
+
+The static executable is `target/x86_64-unknown-linux-musl/release/share2me`. The script selects the appropriate musl C compiler for Fedora or Debian-based systems and rejects an output that still contains a dynamic ELF interpreter or shared-library dependency. The checked-in `Cargo.lock` keeps application builds reproducible.
 
 Run the full local validation suite with:
 
@@ -99,8 +125,6 @@ Then open `https://localhost:8443`. A new self-signed certificate causes an expe
 | `--user NAME` | — | Permanently drop to an unprivileged system account; requires root |
 | `--http-log` | off | Log request method, path, status, and elapsed time |
 
-`share2me PORT` remains accepted as a positional shorthand for the HTTPS port.
-
 ### Endpoints
 
 | Request | Purpose |
@@ -138,11 +162,11 @@ Expiry values are a positive integer followed by `m`, `h`, `d`, or `y`, and are 
 The browser UI can encrypt a file before uploading it:
 
 1. The browser creates a fresh 256-bit AES-GCM key.
-2. It encrypts independent 1 MiB chunks with random 96-bit IVs.
+2. It encrypts 1 MiB chunks with random 96-bit IVs and authenticates the format header plus each chunk's index.
 3. The server stores only framed ciphertext and its SHA-256 digest.
 4. The key and original filename are placed after `#` in the share URL.
 
-URL fragments are not part of HTTP requests, so Share2Me never receives the key. Decryption and viewer rendering happen in the recipient's browser. Losing the complete URL means the file cannot be recovered.
+URL fragments are not part of HTTP requests, so Share2Me never receives the key. Decryption and viewer rendering happen in the recipient's browser; the authenticated header also detects reordered, duplicated, or truncated chunks. Losing the complete URL means the file cannot be recovered.
 
 ## Storage and integrity
 

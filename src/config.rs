@@ -50,18 +50,11 @@ pub struct AppConfig {
 
     #[arg(long, default_value = "data")]
     pub data_dir: PathBuf,
-
-    /// Backwards-compatible positional HTTPS port.
-    #[arg(value_name = "PORT", value_parser = parse_https_port)]
-    positional_port: Option<u16>,
 }
 
 impl AppConfig {
     pub fn from_args() -> Result<Self> {
-        let mut config = Self::parse();
-        if let Some(port) = config.positional_port {
-            config.https_port = port;
-        }
+        let config = Self::parse();
         config.validate()?;
         Ok(config)
     }

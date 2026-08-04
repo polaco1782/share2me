@@ -32,7 +32,7 @@ use tower_http::{
 
 use crate::{
     certificates::Challenges,
-    page::{DECRYPT_PAGE_HTML, INDEX_HTML, ViewerKind, viewer_html},
+    page::{INDEX_HTML, ViewerKind, decrypt_page_html, viewer_html},
     store::{FileStore, MAX_UPLOAD_BYTES, StorageError, is_safe_filename, is_valid_token},
 };
 
@@ -435,7 +435,7 @@ async fn decrypt_page(Path(token): Path<String>) -> Response {
     if !is_valid_token(&token) {
         return not_found().await;
     }
-    html_response(DECRYPT_PAGE_HTML)
+    html_response(decrypt_page_html())
 }
 
 async fn viewer(State(state): State<AppState>, Path(token): Path<String>) -> Response {
