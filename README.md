@@ -2,218 +2,190 @@
 
 ![Share2Me web UI](screenshot.png)
 
-Share2Me is a self-hosted file sharing server you run on your own machine or server. Once it's running, you get a private link for every file you upload — no accounts, no cloud service, no file size limits beyond your own disk space.
+Share2Me is a small self-hosted file-sharing server. It serves a browser UI and a curl-friendly API over HTTPS, with no accounts or file listing.
 
-Everything runs over HTTPS. A TLS certificate is generated automatically on the first launch, so you can get going with zero configuration.
+The server is implemented in safe Rust. The crate forbids application `unsafe` code, bounds every request body, streams uploads and downloads, and uses Rustls for TLS.
 
-## What you can do with it
+## Features
 
-- **Upload from the browser** — open the web UI, pick a file, and get a shareable link instantly.
-- **Upload from the terminal** — use `curl` to push files directly and get the link back in one command.
-- **Single-use links** — mark a file as "single download" and it's permanently deleted the moment someone downloads it.
-- **Expiring links** — set a time limit on any upload (e.g. 5 minutes, 2 hours, 3 days). The file disappears automatically once the time is up.
-- **End-to-end encryption** — tick one checkbox to encrypt files in the browser before they leave your machine. The server only ever sees ciphertext; the key never travels over the network.
-- **Your own domain with a real certificate** — point Share2Me at your domain and let it get a free Let's Encrypt certificate automatically.
-- **HTTP → HTTPS redirect** — anyone who visits the plain HTTP address is silently redirected to HTTPS.
-- **Image viewer** — image uploads open in an in-browser viewer (`/v/<token>`) rather than triggering a download. E2EE images are decrypted and displayed entirely client-side.
+- Browser and command-line uploads, up to 512 MiB per file.
+- Random, non-enumerable share links.
+- Single-download links that remove their content when claimed.
+- Expiring links with automatic background cleanup.
+- Browser-side AES-256-GCM end-to-end encryption; keys stay in URL fragments and never reach the server.
+- Safe text and image viewers. JavaScript and XML are not rendered inline for plaintext uploads.
+- Automatic self-signed certificates or Let's Encrypt HTTP-01 provisioning and renewal.
+- HTTP-to-HTTPS redirects.
+- Optional chroot and permanent privilege dropping on Linux.
 
-## Getting a pre-built binary
+## Getting a release binary
 
-Every release has a ready-to-run Linux binary attached — no compiler needed. Go to the [Releases page](../../releases/latest), download `share2me-<version>-linux-x86_64`, make it executable, and run it:
+Releases contain a statically linked Linux x86-64 binary:
 
 ```bash
 chmod +x share2me-v1.0.0-linux-x86_64
 ./share2me-v1.0.0-linux-x86_64
 ```
 
-The binary is statically linked and has no runtime dependencies.
+See the [latest release](../../releases/latest).
 
 ## Building from source
 
-You need CMake (≥ 3.20) and a C++20 compiler. Everything else is downloaded automatically during the build.
+Install Rust 1.88 or newer, then run:
 
 ```bash
-cmake -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j$(nproc)
+cargo build --release --locked
 ```
 
-The result is a single binary at `build/share2me`. Copy it anywhere you like.
+The executable is `target/release/share2me`. The checked-in `Cargo.lock` keeps application builds reproducible.
 
-> **Let's Encrypt support** is compiled in automatically if `libcurl` is available at build time. The final binary has no dependency on `libcurl` — it's only needed on the machine where you compile. Without it the server works fine with a self-signed or manually supplied certificate.
+Run the full local validation suite with:
 
-## Releases & CI
-
-GitHub Actions will build, strip, and attach the binary to the release automatically. Release notes are generated from the commits since the previous tag.
-
-[Releases page](https://github.com/polaco1782/share2me/releases)
+```bash
+cargo fmt --all -- --check
+cargo test --all-targets --locked
+cargo clippy --all-targets --locked -- -D warnings
+```
 
 ## Running
 
 ```bash
-# Quickstart — HTTPS on port 8443, self-signed certificate, ready immediately
-./build/share2me
+# HTTPS on 8443, HTTP redirect on 8080, automatic self-signed certificate
+./target/release/share2me
 
-# Use standard ports (requires root or CAP_NET_BIND_SERVICE)
-./build/share2me --port 443 --http-port 80
+# Standard public ports; root or CAP_NET_BIND_SERVICE is required to bind them
+./target/release/share2me --port 443 --http-port 80
 
-# Use a certificate you already have
-./build/share2me --domain example.com --cert /etc/ssl/example.crt --key /etc/ssl/example.key
+# Existing certificate and private key
+./target/release/share2me \
+  --domain example.com \
+  --cert /etc/ssl/example.crt \
+  --key /etc/ssl/example.key
 
-# Get a free Let's Encrypt certificate automatically (port 80 must be reachable from the internet)
-./build/share2me --domain example.com --email you@example.com --acme
+# Let's Encrypt; the configured HTTP port must be publicly reachable as port 80
+./target/release/share2me \
+  --port 443 --http-port 80 \
+  --domain example.com \
+  --email you@example.com \
+  --acme
 
-# Test Let's Encrypt integration without burning your rate limit
-./build/share2me --domain example.com --email you@example.com --acme --staging
+# Test the ACME flow without using production rate limits
+./target/release/share2me \
+  --domain example.com \
+  --email you@example.com \
+  --acme --staging
 
-# Turn off the HTTP redirect entirely
-./build/share2me --http-port 0
+# Disable the plain-HTTP listener
+./target/release/share2me --http-port 0
 ```
 
-Then open `https://localhost:8443` in your browser.
+Then open `https://localhost:8443`. A new self-signed certificate causes an expected browser warning.
 
-### Other endpoints
+### Options
 
-| Path | Description |
-|------|-------------|
-| `GET /healthz` | Returns `200 OK` — useful for load balancers and uptime monitors |
-| `GET /v/<token>` | Opens an image in the in-browser viewer instead of downloading it |
-| `GET /d/<token>` | Serves the client-side decryption page for E2EE files |
+| Flag | Default | Purpose |
+|---|---:|---|
+| `--port PORT` | `8443` | HTTPS listener port, 1-65535 |
+| `--http-port PORT` | `8080` | Redirect and ACME HTTP-01 port; `0` disables it |
+| `--cert FILE` | `cert.pem` | TLS certificate chain |
+| `--key FILE` | `key.pem` | TLS private key |
+| `--domain NAME` | `localhost` | Valid ASCII hostname or IP used in certificates and generated links |
+| `--data-dir DIR` | `data` | Private file and metadata directory |
+| `--acme` | off | Obtain and renew a Let's Encrypt certificate |
+| `--email EMAIL` | — | ACME contact; required with `--acme` |
+| `--staging` | off | Use Let's Encrypt staging |
+| `--acme-verbose` | off | Log ACME challenge progress |
+| `--sandbox` | off | Chroot into the data directory after startup; requires root and `--user` |
+| `--user NAME` | — | Permanently drop to an unprivileged system account; requires root |
+| `--http-log` | off | Log request method, path, status, and elapsed time |
 
-### All options
+`share2me PORT` remains accepted as a positional shorthand for the HTTPS port.
 
-| Flag | Default | What it does |
-|------|---------|--------------|
-| `--port PORT` | `8443` | HTTPS port to listen on |
-| `--http-port PORT` | `8080` | HTTP port used for redirects and Let's Encrypt challenges (`0` = off) |
-| `--cert FILE` | `cert.pem` | Path to your TLS certificate |
-| `--key FILE` | `key.pem` | Path to your TLS private key |
-| `--domain NAME` | `localhost` | Your hostname (used in the certificate and in generated links) |
-| `--acme` | off | Obtain a certificate from Let's Encrypt automatically |
-| `--email EMAIL` | — | Your email address (required when using `--acme`) |
-| `--staging` | off | Use Let's Encrypt's test environment (certificate won't be trusted by browsers) |
-| `--acme-verbose` | off | Print detailed ACME protocol output (useful for debugging Let's Encrypt certificate requests) |
-| `--sandbox` | off | Lock the process inside a chroot jail (requires root) |
-| `--user NAME` | — | Drop privileges to this system user after startup (requires root) |
+### Endpoints
 
-## Uploading files
+| Request | Purpose |
+|---|---|
+| `GET /` | Browser upload UI |
+| `GET /healthz` | Returns `200 OK` |
+| `POST /upload` | Multipart browser upload |
+| `PUT /<filename>` | Raw command-line upload |
+| `GET /<token>` | Download a stored file |
+| `GET /v/<token>` | Safe text or image viewer |
+| `GET /d/<token>` | Browser-side E2EE download page |
 
-### From the browser
+Unknown and malformed tokens return the same `404 Not Found` response.
 
-1. Open `https://<host>:<port>` in your browser.
-2. Pick a file.
-3. Optionally turn on **Single-time download** or set an **expiry time**.
-4. Optionally tick **End-to-end encrypted 🔒 E2EE** to encrypt the file in your browser before uploading (see below).
-5. Click **Upload** and copy the link.
-
-### From the terminal
+## Uploading from the terminal
 
 ```bash
-# Upload a file and print the share link
+# Upload and print the share link
 curl -kT photo.jpg https://localhost:8443/photo.jpg
 
-# Single-use link — file is gone after the first download
-curl -kT report.pdf "https://localhost:8443/report.pdf?single"
+# Single-use link
+curl -kT report.pdf 'https://localhost:8443/report.pdf?single'
 
-# Link that expires in 2 hours
-curl -kT notes.txt "https://localhost:8443/notes.txt?expire=2h"
+# Expire in two hours
+curl -kT notes.txt 'https://localhost:8443/notes.txt?expire=2h'
 
-# Both — single-use and expiring in 1 day
-curl -kT archive.zip "https://localhost:8443/archive.zip?single&expire=1d"
-
-# Save the link to a variable
-url=$(curl -skT video.mp4 https://localhost:8443/video.mp4)
-echo "Share this: $url"
+# Combine both properties
+curl -kT archive.zip 'https://localhost:8443/archive.zip?single&expire=1d'
 ```
 
-Expiry values use a number followed by a unit: `m` (minutes), `h` (hours), `d` (days), `y` (years).
+Expiry values are a positive integer followed by `m`, `h`, `d`, or `y`, and are capped at 100 years. Omit `-k` when using a certificate trusted by the client.
 
-Drop the `-k` flag if you're using a trusted certificate (Let's Encrypt or your own CA).
+## End-to-end encryption
 
-## The share link
+The browser UI can encrypt a file before uploading it:
 
-Every upload gets a unique, short link — for example `https://yourhost:8443/a1b2c3d4e5`. Anyone with the link can download the file. There are no passwords and no accounts. Keep the link private if you want the file to stay private.
+1. The browser creates a fresh 256-bit AES-GCM key.
+2. It encrypts independent 1 MiB chunks with random 96-bit IVs.
+3. The server stores only framed ciphertext and its SHA-256 digest.
+4. The key and original filename are placed after `#` in the share URL.
 
-## End-to-end encryption (E2EE)
+URL fragments are not part of HTTP requests, so Share2Me never receives the key. Decryption and viewer rendering happen in the recipient's browser. Losing the complete URL means the file cannot be recovered.
 
-When the **End-to-end encrypted** checkbox is ticked on the upload form, the file is encrypted entirely inside your browser using the Web Crypto API before a single byte is sent to the server.
+## Storage and integrity
 
-### How it works
+The data directory contains an opaque token file and a matching `<token>.json` record. Original filenames are metadata only and are never used as storage paths.
 
-**Upload**
+Uploads are streamed into owner-only temporary files, hashed as they arrive, synchronized, and atomically committed. Downloads derive their storage path from the validated token, open the file without following symlinks, verify SHA-256 on that same file descriptor, rewind it, and stream it to the client.
 
-1. The browser generates a fresh 256-bit AES-GCM key using `crypto.subtle.generateKey`.
-2. The file is split into 1 MB chunks. Each chunk is encrypted with its own random 12-byte IV:
-   ```
-   [4-byte chunk length (big-endian)] [12-byte IV] [ciphertext]
-   ```
-3. The resulting encrypted blob is uploaded to the server via the normal `POST /upload` path. The server stores opaque ciphertext — it has no access to the key or the plaintext.
-4. The raw key is base64-encoded and embedded in the **URL fragment** together with the original filename:
-   ```
-   https://yourhost/d/a1b2c3d4e5#k=<base64-key>&n=photo.jpg
-   ```
+The background housekeeper removes expired records once per minute. Expired links are also removed synchronously when accessed.
 
-**Why the fragment?** The `#fragment` part of a URL is a browser-only concept. It is never included in the HTTP request sent to the server, so the key is mathematically impossible for the server to observe.
+## Security model
 
-**Download**
+- Application code is safe Rust; `unsafe_code = "forbid"` is enforced by Cargo lints.
+- The data directory and all stored data are owner-only (`0700`/`0600`).
+- Rustls accepts modern TLS 1.2/1.3 suites and has a 10-second handshake timeout.
+- Request bodies are hard-limited, uploads have a 30-second idle-body timeout, and only eight uploads write concurrently.
+- Random tokens come from the operating system-backed Rust RNG and contain 128 bits of entropy.
+- HTTP/1 headers have a 10-second read timeout, HTTP/2 stream/header counts are bounded, and the process is capped at 4096 descriptors.
+- Uploaded names, metadata paths, response headers, origins, redirects, and HTML/JavaScript interpolation are validated or encoded.
+- HTML uses per-response Content Security Policy nonces, `nosniff`, `no-referrer`, framing protection, and restrictive browser permissions.
+- Single-use links are claimed in process before their open file is unlinked, preventing concurrent double consumption.
+- Core dumps are disabled at startup so process memory cannot be written to crash files.
+- ACME account keys and TLS private-key copies are stored with mode `0600`; temporary in-memory copies are zeroized.
 
-1. The recipient opens the share link. The browser fetches the ciphertext from `/a1b2c3d4e5` (server sees a normal token request).
-2. The key is read from `location.hash` — this happens entirely in JavaScript, never on the server.
-3. Each frame is decrypted in order with `crypto.subtle.decrypt`.
-4. The assembled plaintext is offered to the recipient as a browser download, named with the original filename stored in the fragment.
+Share links are bearer secrets. Anyone who has a complete link can retrieve the file, so transmit links only through a trusted channel.
 
-### What the server stores
+### Sandbox deployment
 
-| Field | Value |
-|---|---|
-| File data | AES-GCM ciphertext (opaque bytes) |
-| Metadata | Token, ciphertext SHA-256, original filename, single-dl/expiry flags, `encrypted: true` |
-| Encryption key | **Never stored — exists only in the share URL** |
+For defense in depth, create a dedicated unprivileged account and run:
 
-### Compatibility with other features
+```bash
+sudo ./target/release/share2me \
+  --port 443 --http-port 80 \
+  --data-dir /var/lib/share2me \
+  --sandbox --user share2me
+```
 
-- **`curl` / CLI uploads** — E2EE is a browser-only feature. `curl -T` uploads are always plaintext.
+Share2Me binds both sockets and loads/provisions TLS before chrooting and dropping UID/GID. The drop is verified and supplementary groups are cleared. Certificate renewal is disabled inside the chroot because the certificate paths are outside it; renew externally and restart in that mode.
 
-### Security properties
+## Certificates
 
-- The server operator cannot read encrypted files, even with full disk access.
-- Revocation is still possible: delete the token from `data/` and the ciphertext is gone, making the key in the URL useless.
-- Losing the share URL means losing the key — there is no recovery path.
+Without `--acme`, a missing or near-expiry certificate is replaced with an ECDSA self-signed certificate valid for ten years. It covers the configured domain, `localhost`, and `127.0.0.1`.
 
-## Privacy & security
-
-**Nobody can browse your files.** There is no file listing, no index page, and no way to discover what has been uploaded. The only way to reach a file is to know its exact link.
-
-Each link contains a randomly generated token (e.g. `a1b2c3d4e5`). There are over a trillion possible tokens, so guessing one is not a realistic attack. If you keep the link to yourself, the file is effectively private.
-
-A few additional layers back this up:
-
-- **HTTPS only** — all traffic is encrypted. The plain-HTTP server exists solely to redirect browsers to HTTPS; it never serves files.
-- **End-to-end encryption** — when E2EE is enabled at upload time, the server only ever stores ciphertext. The key lives solely in the share URL fragment and never touches the server.
-- **No enumeration** — every request that doesn't match a valid, known token gets a `403 Forbidden` response. There is no way to probe the server to find out what files exist.
-- **Integrity verification** — a SHA-256 checksum is stored at upload time and re-checked on every download. If a file is tampered with on disk, the download is refused.
-- **Self-destructing links** — single-use links delete the file the instant it is downloaded. Expiring links are removed automatically once their time is up, even if nobody ever downloads them.
-- **Optional sandbox** — when started with `--sandbox`, the process is locked inside a chroot jail and (with `--user`) drops to a low-privilege system account, so a hypothetical server compromise cannot reach the rest of the filesystem.
-
-The short version: share the link only with the people you trust, and the file is only accessible to them.
-
-## TLS certificates
-
-On the very first run, if no certificate files are found, Share2Me generates a self-signed certificate automatically. It covers the configured domain, `localhost`, and `127.0.0.1`, and is valid for 10 years. You'll get a browser warning the first time because the certificate is self-signed — that's expected. You can dismiss it or, for a trusted certificate, use Let's Encrypt via `--acme`.
-
-### Automatic renewal
-
-A background thread checks certificate validity every 12 hours. When the certificate is within 30 days of expiry, it is renewed automatically — no restart required. The live TLS context is hot-reloaded so new connections immediately use the fresh certificate:
-
-- **With `--acme`** — renewed via Let's Encrypt. If ACME fails for any reason, a fresh self-signed certificate is generated as a fallback.
-- **Without `--acme`** — a new self-signed certificate is generated and the old one is replaced.
-
-> **Sandbox mode** — when `--sandbox` is active, the renewal thread is not started. Certificate files on the real filesystem are unreachable from inside the chroot jail, so renewal must be handled manually (stop the server, replace the certificate outside the jail, restart).
-
-To swap the certificate at any time, just delete `cert.pem` and `key.pem` and restart — a new one will be generated — or point `--cert` and `--key` at your own files.
-
-## File storage
-
-All uploaded files are kept in a `data/` directory next to the binary. Each file gets its own metadata record that tracks the original filename, a SHA-256 checksum, and any expiry or single-download settings. The checksum is verified on every download to ensure the file hasn't been corrupted. Expired files are cleaned up automatically in the background.
+With `--acme`, account credentials are persisted under `acme_work/`, HTTP-01 challenges are served by the plain-HTTP listener, and the certificate is renewed when near expiry. The live Rustls configuration is reloaded for new connections. If ACME fails during provisioning, Share2Me logs the failure and falls back to a self-signed certificate.
 
 ## License
 
