@@ -23,6 +23,7 @@ use x509_parser::parse_x509_certificate;
 use zeroize::Zeroizing;
 
 pub type Challenges = Arc<RwLock<HashMap<String, String>>>;
+const ACME_OPERATION_TIMEOUT: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug)]
 pub struct CertificateConfig {
@@ -65,6 +66,7 @@ pub async fn provision(
     config: &CertificateConfig,
     challenges: &Challenges,
     renewal_threshold_days: i64,
+    allow_self_signed_fallback: bool,
 ) -> Result<bool> {
     if !needs_renewal(&config.cert_path, &config.key_path, renewal_threshold_days) {
         tracing::info!(
@@ -76,14 +78,35 @@ pub async fn provision(
 
     if config.use_acme {
         tracing::info!(domain = %config.domain, staging = config.staging, "requesting Let's Encrypt certificate");
-        match request_acme_certificate(config, challenges).await {
+        let acme_result = match tokio::time::timeout(
+            ACME_OPERATION_TIMEOUT,
+            request_acme_certificate(config, challenges),
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => Err(anyhow::anyhow!(
+                "ACME operation timed out after {} seconds",
+                ACME_OPERATION_TIMEOUT.as_secs()
+            )),
+        };
+        match acme_result {
             Ok(()) => {
                 tracing::info!(domain = %config.domain, "Let's Encrypt certificate obtained");
                 return Ok(true);
             }
             Err(error) => {
                 tracing::error!(%error, "ACME certificate request failed");
-                tracing::warn!("falling back to a self-signed certificate");
+                if certificate_is_valid_now(&config.cert_path, &config.key_path) {
+                    tracing::warn!("keeping the existing valid certificate and retrying later");
+                    return Ok(false);
+                }
+                if !allow_self_signed_fallback {
+                    return Err(error).context("ACME renewal failed; current certificate retained");
+                }
+                tracing::warn!(
+                    "no valid certificate remains; falling back to a self-signed certificate"
+                );
             }
         }
     }
@@ -102,7 +125,7 @@ pub async fn renewal_loop(
     loop {
         tokio::select! {
             () = tokio::time::sleep(Duration::from_secs(12 * 60 * 60)) => {
-                match provision(&config, &challenges, 30).await {
+                match provision(&config, &challenges, 30, false).await {
                     Ok(true) => {
                         match tls.reload_from_pem_file(&config.cert_path, &config.key_path).await {
                             Ok(()) => tracing::info!("live TLS configuration reloaded"),
@@ -130,6 +153,12 @@ pub fn needs_renewal(cert_path: &Path, key_path: &Path, threshold_days: i64) -> 
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         expiry.saturating_sub(now) < threshold_days.saturating_mul(86_400)
     })
+}
+
+fn certificate_is_valid_now(cert_path: &Path, key_path: &Path) -> bool {
+    key_path.is_file()
+        && certificate_expiry(cert_path)
+            .is_some_and(|expiry| expiry > time::OffsetDateTime::now_utc().unix_timestamp())
 }
 
 fn certificate_expiry(cert_path: &Path) -> Option<i64> {
@@ -234,12 +263,18 @@ async fn request_acme_certificate(
                     .set_ready()
                     .await
                     .context("starting HTTP-01 challenge")?;
+                if config.verbose {
+                    tracing::info!(%token, "ACME HTTP-01 challenge submitted");
+                }
             }
         }
 
         let retry = RetryPolicy::new()
             .initial_delay(Duration::from_secs(1))
             .timeout(Duration::from_secs(120));
+        if config.verbose {
+            tracing::info!("waiting for ACME HTTP-01 validation");
+        }
         let status = order
             .poll_ready(&retry)
             .await
@@ -401,6 +436,10 @@ mod tests {
         };
         generate_self_signed(&config).unwrap();
         assert!(!needs_renewal(&config.cert_path, &config.key_path, 30));
+        assert!(certificate_is_valid_now(
+            &config.cert_path,
+            &config.key_path
+        ));
         assert_eq!(
             fs::metadata(&config.key_path).unwrap().permissions().mode() & 0o777,
             0o600

@@ -885,4 +885,45 @@ mod tests {
             .unwrap();
         assert_eq!(second.status(), StatusCode::NOT_FOUND);
     }
+
+    #[tokio::test]
+    async fn http_router_serves_acme_challenges_without_redirecting() {
+        let challenges: Challenges = Arc::default();
+        challenges.write().await.insert(
+            "challenge_token".to_owned(),
+            "challenge_token.key_authorization".to_owned(),
+        );
+        let app = http_router(challenges, "https://localhost:8443".to_owned(), false);
+
+        let challenge = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/.well-known/acme-challenge/challenge_token")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(challenge.status(), StatusCode::OK);
+        assert_eq!(
+            to_bytes(challenge.into_body(), 1024).await.unwrap(),
+            "challenge_token.key_authorization"
+        );
+
+        let redirect = app
+            .oneshot(
+                Request::builder()
+                    .uri("/healthz")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(redirect.status(), StatusCode::MOVED_PERMANENTLY);
+        assert_eq!(
+            redirect.headers().get(LOCATION).unwrap(),
+            "https://localhost:8443/healthz"
+        );
+    }
 }
