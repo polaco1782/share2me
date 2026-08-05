@@ -1,4 +1,8 @@
 build/
 .cache/
 data/
+target/
 compile_commands.json
+cert.pem
+key.pem
+acme_work/

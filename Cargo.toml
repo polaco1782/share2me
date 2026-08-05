@@ -1,0 +1,59 @@
+[package]
+name = "share2me"
+version = "1.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+description = "A small self-hosted HTTPS file sharing server"
+
+[dependencies]
+anyhow = "1.0"
+axum = { version = "0.8.9", features = ["multipart"] }
+axum-server = { version = "0.8.0", features = ["tls-rustls"] }
+clap = { version = "4.5", features = ["derive"] }
+futures-util = "0.3"
+hex = "0.4"
+hyper-util = { version = "0.1", features = ["server-auto", "tokio"] }
+instant-acme = { version = "0.8.5", features = ["rcgen"] }
+libc = "0.2"
+mime = "0.3"
+mime_guess = "2.0"
+nix = { version = "0.30", features = ["fs", "resource", "user"] }
+percent-encoding = "2.3"
+rand = "0.9"
+rcgen = { version = "0.14.8", features = ["pem", "x509-parser"] }
+rustls = "0.23.43"
+rustls-pemfile = "2.2"
+rustix = { version = "1.1", features = ["fs"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sha2 = "0.10"
+socket2 = "0.6"
+time = "0.3"
+thiserror = "2.0"
+tokio = { version = "1.53", features = ["full"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tower-http = { version = "0.6.11", features = ["catch-panic", "limit", "set-header", "timeout", "trace"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+x509-parser = "0.18"
+zeroize = "1.8"
+
+[dev-dependencies]
+tempfile = "3.23"
+tower = { version = "0.5", features = ["util"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+panic = "abort"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+must_use_candidate = "allow"

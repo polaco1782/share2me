@@ -6,52 +6,58 @@ on:
     tags: ['v*']
   pull_request:
     branches: [master]
-  workflow_dispatch:   # enables the "Run workflow" button on GitHub
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
 
     steps:
       - uses: actions/checkout@v4
 
-      # Cache the compiled dependency tree
-      # Keyed on CMakeLists.txt so any version bump busts the cache automatically.
-      - name: Cache built dependencies
-        uses: actions/cache@v4
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
         with:
-          path: |
-            build/deps-prefix
-            build/openssl_ext-prefix
-            build/_deps
-          key: deps-${{ runner.os }}-${{ hashFiles('CMakeLists.txt') }}
+          components: clippy, rustfmt
+          targets: x86_64-unknown-linux-musl
 
-      - name: Configure
-        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+      - name: Install musl linker
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
 
-      - name: Build
-        run: cmake --build build -j$(nproc)
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
 
-      - name: Strip binary
-        run: strip build/share2me
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-      # Always upload the binary as a workflow artifact (useful for CI checks
-      # even on non-tag pushes — you can download it from the Actions tab).
+      - name: Run tests
+        run: cargo test --all-targets --locked
+
+      - name: Run Clippy
+        run: cargo clippy --all-targets --locked -- -D warnings
+
+      - name: Build static release binary
+        run: ./scripts/build-static.sh
+
       - name: Upload binary artifact
         uses: actions/upload-artifact@v4
         with:
           name: share2me-linux-x86_64
-          path: build/share2me
+          path: target/x86_64-unknown-linux-musl/release/share2me
           retention-days: 14
 
   release:
     needs: build
-    # Only run when a v* tag was pushed (e.g. v1.2.0)
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
 
     permissions:
-      contents: write   # needed to create a GitHub Release
+      contents: write
 
     steps:
       - name: Download binary from build job
@@ -59,8 +65,6 @@ jobs:
         with:
           name: share2me-linux-x86_64
 
-      # Rename to include the version tag so the asset name on the release page
-      # is descriptive (e.g. share2me-v1.2.0-linux-x86_64).
       - name: Rename binary
         run: mv share2me share2me-${{ github.ref_name }}-linux-x86_64
 
@@ -68,4 +72,4 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: share2me-${{ github.ref_name }}-linux-x86_64
-          generate_release_notes: true   # auto-fills release notes from commits
+          generate_release_notes: true
