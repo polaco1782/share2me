@@ -7,8 +7,10 @@ use std::{
 
 use axum::{
     Router,
-    body::Body,
-    extract::{DefaultBodyLimit, FromRequest, Multipart, Path, Request, State},
+    body::{Body, to_bytes},
+    extract::{
+        DefaultBodyLimit, FromRequest, Multipart, Path, Query, Request, State, ws::WebSocketUpgrade,
+    },
     http::{
         HeaderMap, HeaderValue, StatusCode, Uri,
         header::{
@@ -18,12 +20,13 @@ use axum::{
         },
     },
     middleware::{self, Next},
-    response::Response,
-    routing::{any, get},
+    response::{IntoResponse, Response},
+    routing::{any, get, post},
 };
 use futures_util::StreamExt;
 use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde_json::json;
+use str0m::change::SdpOffer;
 use tokio::sync::Semaphore;
 use tokio_util::io::ReaderStream;
 use tower_http::{
@@ -32,7 +35,12 @@ use tower_http::{
 
 use crate::{
     certificates::Challenges,
-    page::{INDEX_HTML, ViewerKind, decrypt_page_html, viewer_html},
+    config::{MediaMode, RtcIceServer},
+    live::{LiveHub, MAX_SDP_BYTES, MAX_SIGNAL_BYTES, PeerRole},
+    media::{ForwardJoinError, MediaForwarder, MediaRole},
+    page::{
+        ViewerKind, decrypt_page_html, index_html, share_page_html, viewer_html, watch_page_html,
+    },
     store::{FileStore, MAX_UPLOAD_BYTES, StorageError, is_safe_filename, is_valid_token},
 };
 
@@ -54,17 +62,37 @@ pub struct AppState {
     base_url: String,
     claims: Arc<Mutex<HashSet<String>>>,
     upload_slots: Arc<Semaphore>,
+    live: LiveHub,
+    ice_servers: Arc<Vec<RtcIceServer>>,
+    media_mode: MediaMode,
+    forwarder: Option<MediaForwarder>,
 }
 
 impl AppState {
-    pub fn new(store: FileStore, base_url: String) -> Self {
+    pub fn new(
+        store: FileStore,
+        base_url: String,
+        live: LiveHub,
+        media_mode: MediaMode,
+        ice_servers: Vec<RtcIceServer>,
+        forwarder: Option<MediaForwarder>,
+    ) -> Self {
         Self {
             store,
             base_url,
             claims: Arc::new(Mutex::new(HashSet::new())),
             upload_slots: Arc::new(Semaphore::new(8)),
+            live,
+            ice_servers: Arc::new(ice_servers),
+            media_mode,
+            forwarder,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, serde::Deserialize)]
+struct SignalQuery {
+    role: PeerRole,
 }
 
 #[derive(Clone, Debug)]
@@ -87,7 +115,8 @@ pub fn https_router(state: AppState, log_requests: bool, domain: &str) -> Router
         log_requests,
         hsts: domain != "localhost" && domain.parse::<IpAddr>().is_err(),
     };
-    Router::new()
+    let media_mode = state.media_mode;
+    let router = Router::new()
         .route("/", get(index))
         .route("/healthz", get(health))
         .route("/robots.txt", get(robots))
@@ -96,7 +125,24 @@ pub fn https_router(state: AppState, log_requests: bool, domain: &str) -> Router
         .route("/d/{token}", get(decrypt_page))
         .route("/v/{token}", get(viewer))
         .route("/{name}", get(download).put(raw_upload))
-        .fallback(not_found)
+        .fallback(not_found);
+    let router = if media_mode.enabled() {
+        let router = router
+            .route("/share", get(share_page))
+            .route("/watch/{token}", get(watch_page))
+            .route("/api/live", post(create_live_share));
+        if media_mode.is_direct() {
+            router.route("/api/live/{token}/signal", any(live_signal))
+        } else {
+            router.route(
+                "/api/live/{token}/forward",
+                post(forward_signal).delete(stop_forward_share),
+            )
+        }
+    } else {
+        router
+    };
+    router
         .with_state(state)
         .layer(DefaultBodyLimit::max(body_limit))
         .layer(RequestBodyLimitLayer::new(body_limit))
@@ -147,7 +193,9 @@ async fn request_policy(
     }
     headers.insert(
         "permissions-policy",
-        HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
+        HeaderValue::from_static(
+            "camera=(), microphone=(), geolocation=(), display-capture=(self)",
+        ),
     );
     if policy.hsts {
         headers.insert(
@@ -161,8 +209,190 @@ async fn request_policy(
     response
 }
 
-async fn index() -> Response {
-    html_response(INDEX_HTML)
+async fn index(State(state): State<AppState>) -> Response {
+    html_response(index_html(state.media_mode.enabled()))
+}
+
+async fn share_page(State(state): State<AppState>) -> Response {
+    html_response(share_page_html(state.media_mode, &state.ice_servers))
+}
+
+async fn watch_page(State(state): State<AppState>, Path(token): Path<String>) -> Response {
+    if !is_valid_token(&token) || !state.live.contains(&token).await {
+        return not_found().await;
+    }
+    html_response(watch_page_html(
+        &token,
+        state.media_mode,
+        &state.ice_servers,
+    ))
+}
+
+async fn create_live_share(State(state): State<AppState>, request: Request) -> Response {
+    if !browser_origin_allowed(request.headers(), &state.base_url) {
+        return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
+    }
+    let Some(session) = state.live.create_session().await else {
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"ok":false,"error":"Live sharing capacity is full"}),
+        );
+    };
+    let watch_url = format!("{}/watch/{}", state.base_url, session.id);
+    tracing::info!(session = %session.id, "live screen share created");
+    json_response(
+        StatusCode::CREATED,
+        json!({
+            "ok": true,
+            "id": session.id,
+            "host_key": session.host_key,
+            "watch_url": watch_url,
+            "mode": state.media_mode,
+        }),
+    )
+}
+
+async fn live_signal(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    Query(query): Query<SignalQuery>,
+    headers: HeaderMap,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    if !state.media_mode.is_direct() {
+        return not_found().await;
+    }
+    if !browser_origin_allowed(&headers, &state.base_url) {
+        return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
+    }
+    if !is_valid_token(&token) || !state.live.contains(&token).await {
+        return not_found().await;
+    }
+    upgrade
+        .max_message_size(MAX_SIGNAL_BYTES)
+        .max_frame_size(MAX_SIGNAL_BYTES)
+        .on_upgrade(move |socket| state.live.handle_socket(socket, token, query.role))
+}
+
+async fn forward_signal(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    Query(query): Query<SignalQuery>,
+    request: Request,
+) -> Response {
+    if state.media_mode != MediaMode::Forward
+        || !browser_origin_allowed(request.headers(), &state.base_url)
+        || !is_valid_token(&token)
+        || !state.live.contains(&token).await
+    {
+        return not_found().await;
+    }
+    let host_key = request
+        .headers()
+        .get("x-share2me-host-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.len() == 64)
+        .map(str::to_owned);
+    let Ok(body) = to_bytes(request.into_body(), MAX_SDP_BYTES).await else {
+        return json_response(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            json!({"ok":false,"error":"WebRTC offer is too large"}),
+        );
+    };
+    let Ok(offer) = serde_json::from_slice::<SdpOffer>(&body) else {
+        return json_response(
+            StatusCode::BAD_REQUEST,
+            json!({"ok":false,"error":"Invalid WebRTC offer"}),
+        );
+    };
+    let connection_id = rand::random::<u128>();
+    let role = match query.role {
+        PeerRole::Host => {
+            let Some(host_key) = host_key else {
+                return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
+            };
+            if !state
+                .live
+                .claim_forward_host(&token, &host_key, connection_id)
+                .await
+            {
+                return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
+            }
+            MediaRole::Publisher
+        }
+        PeerRole::Viewer => {
+            if !state.live.claim_forward_viewer(&token, connection_id).await {
+                return json_response(
+                    StatusCode::CONFLICT,
+                    json!({"ok":false,"error":"This live share is unavailable or full"}),
+                );
+            }
+            MediaRole::Viewer
+        }
+    };
+    let Some(forwarder) = &state.forwarder else {
+        state
+            .live
+            .release_forward_peer(&token, role, connection_id)
+            .await;
+        return json_response(
+            StatusCode::SERVICE_UNAVAILABLE,
+            json!({"ok":false,"error":"Media forwarding is unavailable"}),
+        );
+    };
+    match forwarder
+        .join(token.clone(), role, connection_id, offer)
+        .await
+    {
+        Ok(answer) => json_response(StatusCode::OK, json!(answer)),
+        Err(error) => {
+            state
+                .live
+                .release_forward_peer(&token, role, connection_id)
+                .await;
+            forward_error_response(&error)
+        }
+    }
+}
+
+async fn stop_forward_share(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+    request: Request,
+) -> Response {
+    if state.media_mode != MediaMode::Forward
+        || !browser_origin_allowed(request.headers(), &state.base_url)
+        || !is_valid_token(&token)
+    {
+        return not_found().await;
+    }
+    let Some(host_key) = request
+        .headers()
+        .get("x-share2me-host-key")
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| value.len() == 64)
+    else {
+        return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
+    };
+    if !state.live.stop_forward_session(&token, host_key).await {
+        return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
+    }
+    if let Some(forwarder) = &state.forwarder
+        && let Err(error) = forwarder.stop(token).await
+    {
+        return forward_error_response(&error);
+    }
+    StatusCode::NO_CONTENT.into_response()
+}
+
+fn forward_error_response(error: &ForwardJoinError) -> Response {
+    let status = match error {
+        ForwardJoinError::Busy => StatusCode::SERVICE_UNAVAILABLE,
+        ForwardJoinError::Unavailable => StatusCode::CONFLICT,
+        ForwardJoinError::InvalidOffer(_) => StatusCode::BAD_REQUEST,
+        ForwardJoinError::Timeout => StatusCode::GATEWAY_TIMEOUT,
+    };
+    json_response(status, json!({"ok":false,"error":error.to_string()}))
 }
 
 async fn health() -> Response {
@@ -628,6 +858,10 @@ fn origin_allowed(headers: &HeaderMap, base_url: &str) -> bool {
     origin == base_url
 }
 
+fn browser_origin_allowed(headers: &HeaderMap, base_url: &str) -> bool {
+    headers.contains_key("origin") && origin_allowed(headers, base_url)
+}
+
 fn parse_expiry(value: &str) -> Option<u64> {
     if value.len() < 2 || value.len() > 12 {
         return None;
@@ -802,6 +1036,185 @@ mod tests {
         assert!(!origin_allowed(&headers, "https://files.example"));
         headers.insert("origin", HeaderValue::from_static("https://files.example"));
         assert!(origin_allowed(&headers, "https://files.example"));
+        assert!(browser_origin_allowed(&headers, "https://files.example"));
+        headers.remove("origin");
+        assert!(origin_allowed(&headers, "https://files.example"));
+        assert!(!browser_origin_allowed(&headers, "https://files.example"));
+    }
+
+    #[tokio::test]
+    async fn live_share_creation_returns_separate_host_and_viewer_secrets() {
+        let directory = tempdir().unwrap();
+        let store = FileStore::new(directory.path().to_path_buf()).unwrap();
+        let app = https_router(
+            AppState::new(
+                store,
+                "https://localhost:8443".to_owned(),
+                LiveHub::default(),
+                MediaMode::Stun,
+                Vec::new(),
+                None,
+            ),
+            false,
+            "localhost",
+        );
+        let rejected = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/live")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+
+        let created = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/live")
+                    .header("origin", "https://localhost:8443")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(created.status(), StatusCode::CREATED);
+        let payload: serde_json::Value =
+            serde_json::from_slice(&to_bytes(created.into_body(), 4096).await.unwrap()).unwrap();
+        let id = payload["id"].as_str().unwrap();
+        let host_key = payload["host_key"].as_str().unwrap();
+        let watch_url = payload["watch_url"].as_str().unwrap();
+        assert!(is_valid_token(id));
+        assert_eq!(host_key.len(), 64);
+        assert!(!watch_url.contains(host_key));
+
+        let watch = app
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/watch/{id}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(watch.status(), StatusCode::OK);
+        let body = to_bytes(watch.into_body(), 256 * 1024).await.unwrap();
+        assert!(String::from_utf8_lossy(&body).contains("RTCPeerConnection"));
+    }
+
+    #[tokio::test]
+    async fn disabled_mode_removes_live_routes_and_home_action() {
+        let directory = tempdir().unwrap();
+        let store = FileStore::new(directory.path().to_path_buf()).unwrap();
+        let app = https_router(
+            AppState::new(
+                store,
+                "https://localhost:8443".to_owned(),
+                LiveHub::default(),
+                MediaMode::Disabled,
+                Vec::new(),
+                None,
+            ),
+            false,
+            "localhost",
+        );
+        let home = app
+            .clone()
+            .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let body = to_bytes(home.into_body(), 256 * 1024).await.unwrap();
+        assert!(!String::from_utf8_lossy(&body).contains("href=\"/share\""));
+        let share = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/share")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(share.status(), StatusCode::NOT_FOUND);
+        let create = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/live")
+                    .header("origin", "https://localhost:8443")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(create.status(), StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn forwarding_route_validates_and_authenticates_publisher_offers() {
+        let directory = tempdir().unwrap();
+        let store = FileStore::new(directory.path().to_path_buf()).unwrap();
+        let live = LiveHub::default();
+        let session = live.create_session().await.unwrap();
+        let app = https_router(
+            AppState::new(
+                store,
+                "https://localhost:8443".to_owned(),
+                live,
+                MediaMode::Forward,
+                Vec::new(),
+                None,
+            ),
+            false,
+            "localhost",
+        );
+        let crypto = Arc::new(str0m::crypto::from_feature_flags());
+        let mut rtc = str0m::Rtc::builder()
+            .set_crypto_provider(crypto)
+            .build(std::time::Instant::now());
+        let mut changes = rtc.sdp_api();
+        changes.add_channel("share2me-control".to_owned());
+        changes.add_media(
+            str0m::media::MediaKind::Video,
+            str0m::media::Direction::SendOnly,
+            Some("screen".to_owned()),
+            None,
+            None,
+        );
+        let offer = changes.apply().unwrap().0;
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/live/{}/forward?role=host", session.id))
+                    .header("origin", "https://localhost:8443")
+                    .header("content-type", "application/json")
+                    .header("x-share2me-host-key", &session.host_key)
+                    .body(Body::from(serde_json::to_vec(&offer).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        let missing = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/live/{}/forward?role=host", session.id))
+                    .header("origin", "https://localhost:8443")
+                    .header("content-type", "application/json")
+                    .body(Body::from(serde_json::to_vec(&offer).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -809,7 +1222,14 @@ mod tests {
         let directory = tempdir().unwrap();
         let store = FileStore::new(directory.path().to_path_buf()).unwrap();
         let app = https_router(
-            AppState::new(store, "https://localhost:8443".to_owned()),
+            AppState::new(
+                store,
+                "https://localhost:8443".to_owned(),
+                LiveHub::default(),
+                MediaMode::Disabled,
+                Vec::new(),
+                None,
+            ),
             false,
             "localhost",
         );
@@ -852,7 +1272,14 @@ mod tests {
         let directory = tempdir().unwrap();
         let store = FileStore::new(directory.path().to_path_buf()).unwrap();
         let app = https_router(
-            AppState::new(store, "https://localhost:8443".to_owned()),
+            AppState::new(
+                store,
+                "https://localhost:8443".to_owned(),
+                LiveHub::default(),
+                MediaMode::Disabled,
+                Vec::new(),
+                None,
+            ),
             false,
             "localhost",
         );

@@ -2,7 +2,7 @@
 
 ![Share2Me web UI](screenshot.png)
 
-Share2Me is a small self-hosted file-sharing server. It serves a browser UI and a curl-friendly API over HTTPS, with no accounts or file listing.
+Share2Me is a small self-hosted file and live-screen sharing server. It serves a browser UI and a curl-friendly file API over HTTPS, with no accounts or public listing.
 
 The server is implemented in safe Rust. The crate forbids application `unsafe` code, bounds every request body, streams uploads and downloads, and uses Rustls for TLS.
 
@@ -15,6 +15,9 @@ Rust is not a substitute for security controls, so the port also validates untru
 ## Features
 
 - Browser and command-line uploads, up to 512 MiB per file.
+- Low-latency browser screen sharing with available system audio over WebRTC.
+- Built-in media forwarding by default, with optional direct STUN or relay-only TURN modes.
+- Random viewer links, separate host credentials, and up to eight viewers.
 - Random, non-enumerable share links.
 - Single-download links that remove their content when claimed.
 - Expiring links with automatic background cleanup.
@@ -103,6 +106,14 @@ cargo clippy --all-targets --locked -- -D warnings
 
 # Disable the plain-HTTP listener
 ./target/release/share2me --http-port 0
+
+# Direct peer-to-peer media with STUN discovery
+./target/release/share2me \
+  --media-mode stun \
+  --ice-server stun:stun.example.com:3478
+
+# Disable live media and remove its browser/API routes
+./target/release/share2me --media-mode disabled
 ```
 
 Then open `https://localhost:8443`. A new self-signed certificate causes an expected browser warning.
@@ -124,6 +135,12 @@ Then open `https://localhost:8443`. A new self-signed certificate causes an expe
 | `--sandbox` | off | Chroot into the data directory after startup; requires root and `--user` |
 | `--user NAME` | — | Permanently drop to an unprivileged system account; requires root |
 | `--http-log` | off | Log request method, path, status, and elapsed time |
+| `--media-mode MODE` | `forward` | Live transport: `forward`, `stun`, `turn`, or `disabled` |
+| `--media-port PORT` | `7882` | UDP port used and advertised by `forward` mode |
+| `--media-address IP` | domain-resolved | Public IPv4/IPv6 address advertised by `forward` mode |
+| `--ice-server URL` | — | STUN URL in `stun` mode or TURN URL in `turn` mode; repeatable |
+| `--turn-username NAME` | — | Required username in `turn` mode |
+| `--turn-credential SECRET` | — | Required credential in `turn` mode |
 
 ### Endpoints
 
@@ -131,6 +148,12 @@ Then open `https://localhost:8443`. A new self-signed certificate causes an expe
 |---|---|
 | `GET /` | Browser upload UI |
 | `GET /healthz` | Returns `200 OK` |
+| `GET /share` | Start a live screen-and-audio share when media is enabled |
+| `GET /watch/<token>` | Watch an active live share when media is enabled |
+| `POST /api/live` | Create an in-memory live session when media is enabled |
+| `POST /api/live/<token>/forward?role=...` | Exchange an SDP offer in `forward` mode |
+| `DELETE /api/live/<token>/forward` | Authenticated publisher stop in `forward` mode |
+| `GET /api/live/<token>/signal?role=...` | WebSocket signaling in `stun` or `turn` mode |
 | `POST /upload` | Multipart browser upload |
 | `PUT /<filename>` | Raw command-line upload |
 | `GET /<token>` | Download a stored file |
@@ -138,6 +161,38 @@ Then open `https://localhost:8443`. A new self-signed certificate causes an expe
 | `GET /d/<token>` | Browser-side E2EE download page |
 
 Unknown and malformed tokens return the same `404 Not Found` response.
+
+## Live screen sharing
+
+Open `/share`, choose **Start sharing**, and select a screen, window, or browser tab. Share2Me creates a random 128-bit viewer link. A separate 256-bit host credential authorizes the sharing page and is never included in the viewer URL. The session exists only in memory and the link stops working when the sharer disconnects. Every mode caps a session at eight viewers.
+
+The browser requests screen audio, but the available sources depend on the browser, operating system, and selected surface. For example, a browser may offer audio for a tab but not for an arbitrary window. Capture requires HTTPS (or the browser's trusted localhost exception), an explicit user action, and fresh permission for every share.
+
+`--media-mode forward` is the default. The built-in SFU receives one encrypted WebRTC connection from the sharer, decrypts the media in process, and re-encrypts a separate WebRTC connection for every viewer. Nothing is recorded, and the sharer uploads only one stream, but the server needs outbound bandwidth for every viewer. Forwarded media is encrypted on each network hop; it is not end-to-end encrypted between the browsers.
+
+Forwarding needs no external STUN or TURN service. UDP port `7882` must be reachable from browsers by default. Share2Me resolves `--domain` and advertises that address; behind NAT, a load balancer, or split DNS, pass the public address explicitly and forward the UDP port to this process:
+
+```bash
+./target/release/share2me \
+  --domain share.example.com \
+  --media-mode forward \
+  --media-address 203.0.113.10 \
+  --media-port 7882
+```
+
+Direct browser-to-browser WebRTC is available as an alternative. `stun` mode uses the configured STUN service for public-address discovery but cannot guarantee connectivity through restrictive NATs. `turn` mode sets the browser ICE policy to `relay`, so all media packets go through the configured TURN service:
+
+```bash
+./target/release/share2me \
+  --media-mode turn \
+  --ice-server 'turns:turn.example.com:5349?transport=tcp' \
+  --turn-username share2me \
+  --turn-credential 'replace-with-a-dedicated-secret'
+```
+
+In both direct modes, Share2Me carries only bounded signaling messages and media remains encrypted between the browsers. TURN forwards encrypted packets without terminating the WebRTC session. Use dedicated, restricted TURN credentials and rotate them. Direct connections can reveal peer network addresses to the other participant.
+
+`--media-mode disabled` removes the live-share action and all live media routes while leaving file sharing intact.
 
 ## Uploading from the terminal
 

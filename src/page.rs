@@ -1,6 +1,9 @@
+use serde::Serialize;
 use serde_json::json;
 
-pub const INDEX_HTML: &str = r#"<!doctype html>
+use crate::config::{MediaMode, RtcIceServer};
+
+const INDEX_HTML: &str = r#"<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -13,7 +16,7 @@ pub const INDEX_HTML: &str = r#"<!doctype html>
 .card{width:min(480px,100%);padding:32px;background:var(--panel);border:1px solid var(--edge);border-radius:14px;box-shadow:0 12px 35px #0006}
 h1{margin:0;font-size:1.7rem}.sub{margin:4px 0 24px;color:var(--muted)}.pick{display:flex;justify-content:center;padding:22px;border:2px dashed var(--edge);border-radius:12px;color:var(--muted);cursor:pointer;text-align:center}.pick:hover,.pick.ready{border-color:var(--accent);color:var(--accent)}
 input[type=file]{display:none}.option{display:flex;align-items:center;gap:9px;margin:16px 0;color:var(--muted);cursor:pointer}.option input{width:18px;height:18px;accent-color:var(--accent)}select{width:100%;padding:8px;background:var(--bg);color:var(--text);border:1px solid var(--edge);border-radius:8px}
-button{width:100%;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#082f49;font-weight:700;font-size:1rem;cursor:pointer}button:disabled{opacity:.55}.result{display:none;margin-top:20px;padding:15px;background:var(--bg);border-radius:10px;overflow-wrap:anywhere}.result a{color:var(--accent)}.error{color:var(--danger)}.secure{color:var(--ok);font-size:.78rem;font-weight:700}.foot{text-align:center;color:var(--muted);font-size:.82rem;margin-top:18px}.foot a{color:var(--accent)}
+button,.live{width:100%;padding:13px;border:0;border-radius:10px;background:var(--accent);color:#082f49;font-weight:700;font-size:1rem;cursor:pointer}button:disabled{opacity:.55}.result{display:none;margin-top:20px;padding:15px;background:var(--bg);border-radius:10px;overflow-wrap:anywhere}.result a{color:var(--accent)}.error{color:var(--danger)}.secure{color:var(--ok);font-size:.78rem;font-weight:700}.choice{display:flex;align-items:center;gap:12px;margin:22px 0;color:var(--muted)}.choice::before,.choice::after{content:"";height:1px;flex:1;background:var(--edge)}.live{display:block;text-align:center;text-decoration:none;background:#a78bfa;color:#2e1065}.foot{text-align:center;color:var(--muted);font-size:.82rem;margin-top:18px}.foot a{color:var(--accent)}
 </style>
 </head>
 <body>
@@ -35,6 +38,7 @@ button{width:100%;padding:13px;border:0;border-radius:10px;background:var(--acce
   <button id="submit" type="submit">Upload</button>
 </form>
 <section class="result" id="result" aria-live="polite"></section>
+__LIVE_ACTION__
 <div class="foot">Copyright © 2026 Cassiano Martin<br><a href="https://github.com/polaco1782/share2me" rel="noopener noreferrer">Project on GitHub</a></div>
 </main>
 <script>
@@ -85,6 +89,122 @@ form.addEventListener('submit',async event=>{
 </script>
 </body>
 </html>"#;
+
+pub fn index_html(media_enabled: bool) -> String {
+    let live_action = if media_enabled {
+        "<div class=\"choice\">or</div>\n<a class=\"live\" href=\"/share\">🖥️ Share your screen</a>"
+    } else {
+        ""
+    };
+    INDEX_HTML.replace("__LIVE_ACTION__", live_action)
+}
+
+pub fn share_page_html(mode: MediaMode, ice_servers: &[RtcIceServer]) -> String {
+    let template = if mode == MediaMode::Forward {
+        FORWARD_SHARE_PAGE_HTML
+    } else {
+        DIRECT_SHARE_PAGE_HTML
+    };
+    live_page_html(template, mode, ice_servers)
+}
+
+pub fn watch_page_html(token: &str, mode: MediaMode, ice_servers: &[RtcIceServer]) -> String {
+    let template = if mode == MediaMode::Forward {
+        FORWARD_WATCH_PAGE_HTML
+    } else {
+        DIRECT_WATCH_PAGE_HTML
+    };
+    live_page_html(template, mode, ice_servers).replace("__TOKEN__", &json_for_script(token))
+}
+
+fn live_page_html(template: &str, mode: MediaMode, ice_servers: &[RtcIceServer]) -> String {
+    let ice_servers = json_value_for_script(ice_servers);
+    template
+        .replace("__LIVE_STYLE__", LIVE_STYLE)
+        .replace("__LIVE_COMMON_JS__", LIVE_COMMON_JS)
+        .replace("__ICE_SERVERS__", &ice_servers)
+        .replace("__MEDIA_MODE__", &json_value_for_script(&mode))
+}
+
+const LIVE_STYLE: &str = r":root{color-scheme:dark;--bg:#0f172a;--panel:#1e293b;--edge:#334155;--text:#e2e8f0;--muted:#94a3b8;--accent:#38bdf8;--danger:#f87171;--ok:#4ade80}
+*{box-sizing:border-box}body{margin:0;min-height:100vh;background:var(--bg);color:var(--text);font:15px/1.45 system-ui,sans-serif;padding:20px}.shell{width:min(1100px,100%);margin:0 auto}.bar{display:flex;align-items:center;justify-content:space-between;gap:16px;margin-bottom:18px}.bar h1{margin:0;font-size:1.5rem}.bar a{color:var(--accent)}.panel{padding:24px;background:var(--panel);border:1px solid var(--edge);border-radius:14px;box-shadow:0 12px 35px #0006}.stage{display:grid;place-items:center;min-height:280px;background:#020617;border:1px solid var(--edge);border-radius:11px;overflow:hidden}.stage video{display:block;width:100%;max-height:72vh;background:#000}.controls{display:flex;flex-wrap:wrap;gap:12px;margin-top:18px}.controls button{padding:12px 18px;border:0;border-radius:9px;background:var(--accent);color:#082f49;font-weight:700;cursor:pointer}.controls button.stop{background:var(--danger);color:#450a0a}.controls button:disabled{opacity:.55;cursor:not-allowed}.status{color:var(--muted);margin:14px 0 0}.status.error{color:var(--danger)}.status.ok{color:var(--ok)}.share-link{display:none;margin-top:18px;padding:14px;background:var(--bg);border-radius:9px;overflow-wrap:anywhere}.share-link a{color:var(--accent)}.note{color:var(--muted);font-size:.88rem}.hidden{display:none!important}@media(max-width:600px){body{padding:12px}.panel{padding:16px}.stage{min-height:200px}.bar{align-items:flex-start;flex-direction:column}}";
+
+const LIVE_COMMON_JS: &str = r"const MEDIA_MODE=__MEDIA_MODE__,ICE_SERVERS=__ICE_SERVERS__,statusElement=document.querySelector('#status');
+function setStatus(message,kind=''){statusElement.textContent=message;statusElement.className='status'+(kind?' '+kind:'')}
+function signalingUrl(token,role){const scheme=location.protocol==='https:'?'wss:':'ws:';return scheme+'//'+location.host+'/api/live/'+token+'/signal?role='+role}
+function newPeerConnection(){return new RTCPeerConnection({iceServers:ICE_SERVERS,iceTransportPolicy:MEDIA_MODE==='turn'?'relay':'all'})}
+async function addRemoteIce(peer,queue,candidate){if(peer.remoteDescription)await peer.addIceCandidate(candidate);else queue.push(candidate)}
+async function flushRemoteIce(peer,queue){for(const candidate of queue.splice(0))await peer.addIceCandidate(candidate)}
+async function waitForIceGathering(peer){if(peer.iceGatheringState==='complete')return;await new Promise(resolve=>{let timeout=null;const finish=()=>{clearTimeout(timeout);peer.removeEventListener('icegatheringstatechange',changed);resolve()},changed=()=>{if(peer.iceGatheringState==='complete')finish()};peer.addEventListener('icegatheringstatechange',changed);timeout=setTimeout(finish,5000)})}
+async function forwardOffer(token,role,description,hostKey){const headers={accept:'application/json','content-type':'application/json'};if(hostKey)headers['x-share2me-host-key']=hostKey;const response=await fetch('/api/live/'+token+'/forward?role='+role,{method:'POST',headers,body:JSON.stringify(description)}),payload=await response.json().catch(()=>({}));if(!response.ok)throw new Error(payload.error||'Unable to create the media connection');return payload}
+";
+
+const DIRECT_SHARE_PAGE_HTML: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Share2Me – Share screen</title>
+<style>__LIVE_STYLE__</style></head><body><main class="shell"><header class="bar"><h1>🖥️ Share your screen</h1><a href="/">← File sharing</a></header><section class="panel">
+<div class="stage"><video id="preview" autoplay muted playsinline></video><p id="placeholder" class="note">Your preview will appear here. The browser will ask which screen, window, or tab to share.</p></div>
+<div class="controls"><button id="start">Start sharing</button><button id="stop" class="stop hidden">Stop sharing</button><button id="copy" class="hidden">Copy viewer link</button></div>
+<p id="status" class="status">Nothing is being shared.</p><section id="shareLink" class="share-link"><strong>Viewer link</strong><br><a id="watchLink" href=""></a><p class="note">Anyone with this link can watch while this page is sharing. Up to 8 viewers can connect.</p></section>
+<p class="note">Screen audio is requested, but browsers and operating systems decide which audio sources are available. When sharing a browser tab, enable its “share audio” option if shown.</p>
+</section></main><script>
+__LIVE_COMMON_JS__
+const startButton=document.querySelector('#start'),stopButton=document.querySelector('#stop'),copyButton=document.querySelector('#copy'),preview=document.querySelector('#preview'),placeholder=document.querySelector('#placeholder'),shareLink=document.querySelector('#shareLink'),watchLink=document.querySelector('#watchLink');
+let stream=null,socket=null,messageChain=Promise.resolve();const peers=new Map();
+function send(message){if(socket&&socket.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message))}
+function closePeer(viewer){const state=peers.get(viewer);if(state){state.peer.close();peers.delete(viewer)}}
+function updateViewerCount(){const count=peers.size;if(stream)setStatus('Sharing with '+count+' viewer'+(count===1?'':'s')+'.','ok')}
+async function addViewer(viewer){if(peers.has(viewer)||!stream)return;const peer=newPeerConnection(),remoteIce=[];peers.set(viewer,{peer,remoteIce});for(const track of stream.getTracks())peer.addTrack(track,stream);peer.onicecandidate=event=>{if(event.candidate)send({type:'ice',viewer,candidate:event.candidate.toJSON()})};peer.onconnectionstatechange=()=>{if(['failed','closed'].includes(peer.connectionState)){closePeer(viewer);updateViewerCount()}};try{await peer.setLocalDescription(await peer.createOffer());send({type:'offer',viewer,sdp:peer.localDescription.sdp});updateViewerCount()}catch(error){closePeer(viewer);setStatus(error instanceof Error?error.message:'Unable to connect viewer','error')}}
+async function handleSignal(message){if(message.type==='ready'){updateViewerCount();return}if(message.type==='viewer_joined'){await addViewer(message.viewer);return}if(message.type==='viewer_left'){closePeer(message.viewer);updateViewerCount();return}if(message.type==='answer'){const state=peers.get(message.viewer);if(!state)return;await state.peer.setRemoteDescription({type:'answer',sdp:message.sdp});await flushRemoteIce(state.peer,state.remoteIce);return}if(message.type==='ice'){const state=peers.get(message.viewer);if(state)await addRemoteIce(state.peer,state.remoteIce,message.candidate);return}if(message.type==='error')setStatus(message.message||'Signaling failed','error')}
+async function startSharing(){startButton.disabled=true;setStatus('Choose what to share…');try{stream=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:{ideal:30,max:30}},audio:true,systemAudio:'include',surfaceSwitching:'include',selfBrowserSurface:'exclude'});preview.srcObject=stream;placeholder.classList.add('hidden');const response=await fetch('/api/live',{method:'POST',headers:{accept:'application/json'}}),payload=await response.json().catch(()=>({}));if(!response.ok||!payload.ok)throw new Error(payload.error||'Unable to create a live share');watchLink.href=payload.watch_url;watchLink.textContent=payload.watch_url;shareLink.style.display='block';copyButton.classList.remove('hidden');stopButton.classList.remove('hidden');startButton.classList.add('hidden');socket=new WebSocket(signalingUrl(payload.id,'host'));socket.addEventListener('open',()=>send({type:'authenticate',key:payload.host_key}));socket.addEventListener('message',event=>{messageChain=messageChain.then(()=>handleSignal(JSON.parse(event.data))).catch(error=>setStatus(error instanceof Error?error.message:'Signaling failed','error'))});socket.addEventListener('close',()=>{if(stream)setStatus('The signaling connection closed. Stop and start a new share.','error')});for(const track of stream.getVideoTracks())track.addEventListener('ended',stopSharing,{once:true});const audio=stream.getAudioTracks().length?' Screen audio is included when the selected source provides it.':' No screen-audio track was provided by the browser.';setStatus('Viewer link ready.'+audio,'ok')}catch(error){if(stream)for(const track of stream.getTracks())track.stop();stream=null;preview.srcObject=null;placeholder.classList.remove('hidden');setStatus(error instanceof Error?error.message:'Screen sharing was cancelled','error');startButton.disabled=false}}
+function stopSharing(){if(socket&&socket.readyState===WebSocket.OPEN)send({type:'stop'});if(socket)socket.close();socket=null;for(const viewer of [...peers.keys()])closePeer(viewer);if(stream)for(const track of stream.getTracks())track.stop();stream=null;preview.srcObject=null;placeholder.classList.remove('hidden');shareLink.style.display='none';copyButton.classList.add('hidden');stopButton.classList.add('hidden');startButton.classList.remove('hidden');startButton.disabled=false;setStatus('Sharing stopped. The old viewer link no longer works.')}
+startButton.addEventListener('click',startSharing);stopButton.addEventListener('click',stopSharing);copyButton.addEventListener('click',async()=>{await navigator.clipboard.writeText(watchLink.href);copyButton.textContent='Copied!';setTimeout(()=>copyButton.textContent='Copy viewer link',1200)});addEventListener('pagehide',()=>{if(socket)socket.close();if(stream)for(const track of stream.getTracks())track.stop()});
+</script></body></html>"#;
+
+const DIRECT_WATCH_PAGE_HTML: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Share2Me – Live screen</title>
+<style>__LIVE_STYLE__</style></head><body><main class="shell"><header class="bar"><h1>🔴 Live screen</h1><a href="/">Share something</a></header><section class="panel">
+<div class="stage"><video id="video" autoplay playsinline controls></video><p id="placeholder" class="note">Waiting for the shared screen…</p></div><div class="controls"><button id="play" class="hidden">Play video and audio</button></div><p id="status" class="status">Connecting…</p>
+<p class="note">This is a peer-to-peer WebRTC stream. Keep this bearer link private; anyone who has it can watch while the share is active.</p>
+</section></main><script>
+__LIVE_COMMON_JS__
+const TOKEN=__TOKEN__,video=document.querySelector('#video'),placeholder=document.querySelector('#placeholder'),playButton=document.querySelector('#play');let peer=null,remoteIce=[],messageChain=Promise.resolve();
+const socket=new WebSocket(signalingUrl(TOKEN,'viewer'));function send(message){if(socket.readyState===WebSocket.OPEN)socket.send(JSON.stringify(message))}
+function createPeer(){if(peer)peer.close();peer=newPeerConnection();remoteIce=[];peer.onicecandidate=event=>{if(event.candidate)send({type:'ice',candidate:event.candidate.toJSON()})};peer.ontrack=event=>{if(event.streams[0])video.srcObject=event.streams[0];else{const media=video.srcObject instanceof MediaStream?video.srcObject:new MediaStream();media.addTrack(event.track);video.srcObject=media}placeholder.classList.add('hidden');video.play().then(()=>{playButton.classList.add('hidden');setStatus('Watching live.','ok')}).catch(()=>{playButton.classList.remove('hidden');setStatus('The stream is ready. Press play to hear audio.','ok')})};peer.onconnectionstatechange=()=>{if(peer.connectionState==='connected')setStatus('Watching live.','ok');else if(peer.connectionState==='failed')setStatus('The peer connection failed. A TURN server may be required for these networks.','error')}}
+async function handleSignal(message){if(message.type==='ready'){setStatus('Connected. Waiting for the sharer…');return}if(message.type==='offer'){createPeer();await peer.setRemoteDescription({type:'offer',sdp:message.sdp});await flushRemoteIce(peer,remoteIce);await peer.setLocalDescription(await peer.createAnswer());send({type:'answer',sdp:peer.localDescription.sdp});return}if(message.type==='ice'&&peer){await addRemoteIce(peer,remoteIce,message.candidate);return}if(message.type==='ended'){if(peer)peer.close();video.srcObject=null;placeholder.classList.remove('hidden');setStatus('This screen share has ended.','error');socket.close();return}if(message.type==='error')setStatus(message.message||'Unable to watch this share','error')}
+socket.addEventListener('message',event=>{messageChain=messageChain.then(()=>handleSignal(JSON.parse(event.data))).catch(error=>setStatus(error instanceof Error?error.message:'Signaling failed','error'))});socket.addEventListener('close',()=>{if(!video.srcObject)setStatus('This screen share is unavailable or has ended.','error')});socket.addEventListener('error',()=>setStatus('Unable to connect to the screen share.','error'));playButton.addEventListener('click',()=>video.play().then(()=>playButton.classList.add('hidden')));addEventListener('pagehide',()=>{socket.close();if(peer)peer.close()});
+</script></body></html>"#;
+
+const FORWARD_SHARE_PAGE_HTML: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Share2Me – Share screen</title>
+<style>__LIVE_STYLE__</style></head><body><main class="shell"><header class="bar"><h1>🖥️ Share your screen</h1><a href="/">← File sharing</a></header><section class="panel">
+<div class="stage"><video id="preview" autoplay muted playsinline></video><p id="placeholder" class="note">Your preview will appear here. The browser will ask which screen, window, or tab to share.</p></div>
+<div class="controls"><button id="start">Start sharing</button><button id="stop" class="stop hidden">Stop sharing</button><button id="copy" class="hidden">Copy viewer link</button></div>
+<p id="status" class="status">Nothing is being shared.</p><section id="shareLink" class="share-link"><strong>Viewer link</strong><br><a id="watchLink" href=""></a><p class="note">Anyone with this link can watch while this page is sharing. Up to 8 viewers can connect.</p></section>
+<p class="note">The built-in media forwarder receives one WebRTC upload and sends it to each viewer. Screen audio is requested, but the browser and operating system decide which audio sources are available.</p>
+</section></main><script>
+__LIVE_COMMON_JS__
+const startButton=document.querySelector('#start'),stopButton=document.querySelector('#stop'),copyButton=document.querySelector('#copy'),preview=document.querySelector('#preview'),placeholder=document.querySelector('#placeholder'),shareLink=document.querySelector('#shareLink'),watchLink=document.querySelector('#watchLink');
+let stream=null,peer=null,channel=null,sessionId=null,hostKey=null,stopping=false;
+function forwardStatus(){if(!stream)return;const audio=stream.getAudioTracks().length?' Screen audio is included when the selected source provides it.':' No screen-audio track was provided by the browser.';setStatus('Viewer link ready.'+audio,'ok')}
+async function startSharing(){startButton.disabled=true;setStatus('Choose what to share…');try{stream=await navigator.mediaDevices.getDisplayMedia({video:{frameRate:{ideal:30,max:30}},audio:true,systemAudio:'include',surfaceSwitching:'include',selfBrowserSurface:'exclude'});preview.srcObject=stream;placeholder.classList.add('hidden');const response=await fetch('/api/live',{method:'POST',headers:{accept:'application/json'}}),payload=await response.json().catch(()=>({}));if(!response.ok||!payload.ok)throw new Error(payload.error||'Unable to create a live share');sessionId=payload.id;hostKey=payload.host_key;peer=new RTCPeerConnection({iceServers:[]});channel=peer.createDataChannel('share2me-control');channel.addEventListener('open',forwardStatus);channel.addEventListener('message',event=>{try{const message=JSON.parse(event.data);if(message.control==='ended')stopSharing()}catch{}});for(const track of stream.getTracks())peer.addTrack(track,stream);peer.addEventListener('connectionstatechange',()=>{if(peer&&peer.connectionState==='connected')forwardStatus();else if(peer&&peer.connectionState==='failed')setStatus('The media connection failed. Check that the Share2Me UDP media port is reachable.','error')});await peer.setLocalDescription(await peer.createOffer());await waitForIceGathering(peer);const answer=await forwardOffer(sessionId,'host',peer.localDescription,hostKey);await peer.setRemoteDescription(answer);watchLink.href=payload.watch_url;watchLink.textContent=payload.watch_url;shareLink.style.display='block';copyButton.classList.remove('hidden');stopButton.classList.remove('hidden');startButton.classList.add('hidden');for(const track of stream.getVideoTracks())track.addEventListener('ended',()=>stopSharing(),{once:true});forwardStatus()}catch(error){const message=error instanceof Error?error.message:'Screen sharing was cancelled';stopSharing(message,'error')}}
+function stopSharing(message='Sharing stopped. The old viewer link no longer works.',kind=''){if(stopping)return;stopping=true;if(channel&&channel.readyState==='open')channel.send(JSON.stringify({type:'stop'}));if(sessionId&&hostKey)fetch('/api/live/'+sessionId+'/forward',{method:'DELETE',headers:{'x-share2me-host-key':hostKey},keepalive:true}).catch(()=>{});if(peer)peer.close();peer=null;channel=null;if(stream)for(const track of stream.getTracks())track.stop();stream=null;preview.srcObject=null;placeholder.classList.remove('hidden');shareLink.style.display='none';copyButton.classList.add('hidden');stopButton.classList.add('hidden');startButton.classList.remove('hidden');startButton.disabled=false;sessionId=null;hostKey=null;setStatus(message,kind);stopping=false}
+startButton.addEventListener('click',startSharing);stopButton.addEventListener('click',()=>stopSharing());copyButton.addEventListener('click',async()=>{await navigator.clipboard.writeText(watchLink.href);copyButton.textContent='Copied!';setTimeout(()=>copyButton.textContent='Copy viewer link',1200)});addEventListener('pagehide',()=>stopSharing());
+</script></body></html>"#;
+
+const FORWARD_WATCH_PAGE_HTML: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Share2Me – Live screen</title>
+<style>__LIVE_STYLE__</style></head><body><main class="shell"><header class="bar"><h1>🔴 Live screen</h1><a href="/">Share something</a></header><section class="panel">
+<div class="stage"><video id="video" autoplay playsinline controls></video><p id="placeholder" class="note">Waiting for the shared screen…</p></div><div class="controls"><button id="play" class="hidden">Play video and audio</button></div><p id="status" class="status">Connecting…</p>
+<p class="note">This WebRTC stream is forwarded by the Share2Me server. Keep this bearer link private; anyone who has it can watch while the share is active.</p>
+</section></main><script>
+__LIVE_COMMON_JS__
+const TOKEN=__TOKEN__,video=document.querySelector('#video'),placeholder=document.querySelector('#placeholder'),playButton=document.querySelector('#play');let peer=null,channel=null,messageChain=Promise.resolve();
+function showTrack(event){if(event.streams[0])video.srcObject=event.streams[0];else{const media=video.srcObject instanceof MediaStream?video.srcObject:new MediaStream();media.addTrack(event.track);video.srcObject=media}placeholder.classList.add('hidden');video.play().then(()=>{playButton.classList.add('hidden');setStatus('Watching live.','ok')}).catch(()=>{playButton.classList.remove('hidden');setStatus('The stream is ready. Press play to hear audio.','ok')})}
+function endShare(message='This screen share has ended.'){if(peer)peer.close();peer=null;video.srcObject=null;placeholder.classList.remove('hidden');setStatus(message,'error')}
+async function handleForwardMessage(event){const message=JSON.parse(event.data);if(message.control==='ended'){endShare();return}if(message.type==='offer'){await peer.setRemoteDescription(message);await peer.setLocalDescription(await peer.createAnswer());channel.send(JSON.stringify(peer.localDescription))}}
+async function connect(){try{peer=new RTCPeerConnection({iceServers:[]});channel=peer.createDataChannel('share2me-control');channel.addEventListener('open',()=>{if(!video.srcObject)setStatus('Connected. Waiting for the shared screen…')});channel.addEventListener('message',event=>{messageChain=messageChain.then(()=>handleForwardMessage(event)).catch(error=>endShare(error instanceof Error?error.message:'Media negotiation failed'))});peer.addEventListener('track',showTrack);peer.addEventListener('connectionstatechange',()=>{if(peer&&peer.connectionState==='connected'&&video.srcObject)setStatus('Watching live.','ok');else if(peer&&peer.connectionState==='failed')endShare('The media connection failed. Check that the Share2Me UDP media port is reachable.')});await peer.setLocalDescription(await peer.createOffer());await waitForIceGathering(peer);const answer=await forwardOffer(TOKEN,'viewer',peer.localDescription);await peer.setRemoteDescription(answer)}catch(error){endShare(error instanceof Error?error.message:'Unable to watch this share')}}
+playButton.addEventListener('click',()=>video.play().then(()=>playButton.classList.add('hidden')));addEventListener('pagehide',()=>{if(peer)peer.close()});connect();
+</script></body></html>"#;
 
 pub fn decrypt_page_html() -> String {
     DECRYPT_PAGE_HTML.replace("__DECRYPT_FUNCTION__", DECRYPT_FUNCTION_JS)
@@ -168,8 +288,12 @@ const DECRYPT_FUNCTION_JS: &str = r"async function decrypt(raw,keyText,mime=''){
 }";
 
 fn json_for_script(value: &str) -> String {
-    json!(value)
-        .to_string()
+    json_value_for_script(&json!(value))
+}
+
+fn json_value_for_script(value: &(impl Serialize + ?Sized)) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| "null".to_owned())
         .replace('&', "\\u0026")
         .replace('<', "\\u003c")
         .replace('>', "\\u003e")
@@ -211,5 +335,37 @@ mod tests {
         assert!(!page.contains("__DECRYPT_FUNCTION__"));
         assert!(page.contains("Unsupported encrypted file format"));
         assert!(page.contains("additionalData:aad"));
+    }
+
+    #[test]
+    fn live_pages_embed_configuration_without_script_injection() {
+        let ice_servers = vec![RtcIceServer {
+            urls: "turns:turn.example.com/<script>".to_owned(),
+            username: Some("</script><script>alert(1)</script>".to_owned()),
+            credential: Some("secret".to_owned()),
+        }];
+        let host = share_page_html(MediaMode::Turn, &ice_servers);
+        let viewer = watch_page_html(
+            "0123456789abcdef0123456789abcdef",
+            MediaMode::Turn,
+            &ice_servers,
+        );
+        assert!(!host.contains("</script><script>alert(1)</script>"));
+        assert!(host.contains("\\u003c/script\\u003e"));
+        assert!(!host.contains("__ICE_SERVERS__"));
+        assert!(!viewer.contains("__TOKEN__"));
+        assert!(viewer.contains("new RTCPeerConnection"));
+        assert!(viewer.contains("MEDIA_MODE=\"turn\""));
+    }
+
+    #[test]
+    fn forwarding_and_disabled_pages_have_distinct_surfaces() {
+        let index = index_html(false);
+        assert!(!index.contains("href=\"/share\""));
+        let host = share_page_html(MediaMode::Forward, &[]);
+        let viewer = watch_page_html("0123456789abcdef0123456789abcdef", MediaMode::Forward, &[]);
+        assert!(host.contains("/forward?role="));
+        assert!(host.contains("one WebRTC upload"));
+        assert!(viewer.contains("forwarded by the Share2Me server"));
     }
 }

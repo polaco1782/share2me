@@ -2,6 +2,8 @@ mod certificates;
 mod config;
 mod daemon;
 mod housekeeper;
+mod live;
+mod media;
 mod page;
 mod routes;
 mod sandbox;
@@ -22,13 +24,40 @@ use hyper_util::{
 use socket2::{Domain, Protocol, Socket, Type};
 use std::fs::File;
 use tokio::{sync::watch, task::JoinHandle};
-use tracing_subscriber::{EnvFilter, fmt::Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
+use tracing_subscriber::{
+    EnvFilter, fmt::Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt,
+};
 
 use crate::{
-    certificates::CertificateConfig, config::AppConfig, routes::AppState, store::FileStore,
+    certificates::CertificateConfig,
+    config::{AppConfig, MediaMode},
+    live::LiveHub,
+    media::ForwardEvent,
+    routes::AppState,
+    store::FileStore,
 };
 
 type ServerTask = JoinHandle<io::Result<()>>;
+
+struct PreparedServers {
+    secure_listener: TcpListener,
+    redirect_handle: Handle<SocketAddr>,
+    redirect_task: Option<ServerTask>,
+    challenges: certificates::Challenges,
+    certificate_config: CertificateConfig,
+    tls: RustlsConfig,
+}
+
+struct ActiveMedia {
+    forwarder: media::MediaForwarder,
+    runtime: media::MediaRuntime,
+    events: tokio::sync::mpsc::UnboundedReceiver<ForwardEvent>,
+}
+
+struct RunningMedia {
+    runtime: media::MediaRuntime,
+    event_task: JoinHandle<()>,
+}
 
 #[tokio::main]
 async fn main() {
@@ -40,11 +69,11 @@ async fn main() {
         }
     };
 
-    if config.daemon {
-        if let Err(error) = daemon::daemonize() {
-            eprintln!("Failed to daemonize: {error}");
-            std::process::exit(1);
-        }
+    if config.daemon
+        && let Err(error) = daemon::daemonize()
+    {
+        eprintln!("Failed to daemonize: {error}");
+        std::process::exit(1);
     }
 
     init_logging(config.log_file.as_deref());
@@ -65,33 +94,15 @@ async fn run(config: AppConfig) -> Result<()> {
         sandbox::assign_data_directory(store.data_dir(), user)?;
     }
 
-    // Bind privileged ports before ACME provisioning and before dropping privileges.
-    let secure_listener = bind_listener(config.https_port, "HTTPS")?;
-    let redirect_listener = if config.http_port == 0 {
-        None
-    } else {
-        Some(bind_listener(config.http_port, "HTTP")?)
-    };
-
-    let challenges = certificates::restore_challenges(std::path::Path::new("acme_work")).await;
-    let redirect_handle: Handle<SocketAddr> = Handle::new();
-    let mut redirect_task = spawn_http_server(
-        redirect_listener,
-        challenges.clone(),
-        config.base_url(),
-        config.http_log,
-        redirect_handle.clone(),
-    );
-    if let Some(task) = redirect_task.as_mut() {
-        let address = wait_for_server("HTTP", &redirect_handle, task).await?;
-        tracing::info!(%address, "HTTP challenge and redirect server is ready");
-    }
-
-    let certificate_config = certificate_config(&config);
-    provision_while_http_runs(&certificate_config, &challenges, redirect_task.as_mut()).await?;
-    let tls = RustlsConfig::from_pem_file(&config.cert, &config.key)
-        .await
-        .context("loading TLS certificate and private key")?;
+    let PreparedServers {
+        secure_listener,
+        redirect_handle,
+        redirect_task,
+        challenges,
+        certificate_config,
+        tls,
+    } = prepare_servers(&config).await?;
+    let media_setup = start_media(&config).await?;
 
     if config.sandbox {
         tracing::info!(path = %store.data_dir().display(), "entering chroot jail");
@@ -103,7 +114,16 @@ async fn run(config: AppConfig) -> Result<()> {
         sandbox::drop_privileges(user)?;
     }
 
-    let state = AppState::new(store.clone(), config.base_url());
+    let live = LiveHub::default();
+    let (forwarder, running_media) = attach_media(&live, media_setup);
+    let state = AppState::new(
+        store.clone(),
+        config.base_url(),
+        live,
+        config.media_mode,
+        config.rtc_ice_servers(),
+        forwarder,
+    );
     let app = routes::https_router(state, config.http_log, &config.domain);
     let secure_handle: Handle<SocketAddr> = Handle::new();
     let mut server =
@@ -153,11 +173,135 @@ async fn run(config: AppConfig) -> Result<()> {
     if let Some(task) = redirect_task {
         task.await.context("joining HTTP server task")??;
     }
-    match early_server_result {
-        Some(result) => result.context("joining HTTPS server task")??,
-        None => secure_task.await.context("joining HTTPS server task")??,
+    let secure_result = match early_server_result {
+        Some(result) => result
+            .context("joining HTTPS server task")
+            .and_then(|result| result.context("running HTTPS server")),
+        None => secure_task
+            .await
+            .context("joining HTTPS server task")
+            .and_then(|result| result.context("running HTTPS server")),
+    };
+    if let Some(media) = running_media {
+        media.shutdown().await?;
     }
+    secure_result?;
     Ok(())
+}
+
+async fn prepare_servers(config: &AppConfig) -> Result<PreparedServers> {
+    // Bind privileged ports before ACME provisioning and before dropping privileges.
+    let secure_listener = bind_listener(config.https_port, "HTTPS")?;
+    let redirect_listener = if config.http_port == 0 {
+        None
+    } else {
+        Some(bind_listener(config.http_port, "HTTP")?)
+    };
+    let challenges = certificates::restore_challenges(std::path::Path::new("acme_work")).await;
+    let redirect_handle: Handle<SocketAddr> = Handle::new();
+    let mut redirect_task = spawn_http_server(
+        redirect_listener,
+        challenges.clone(),
+        config.base_url(),
+        config.http_log,
+        redirect_handle.clone(),
+    );
+    if let Some(task) = redirect_task.as_mut() {
+        let address = wait_for_server("HTTP", &redirect_handle, task).await?;
+        tracing::info!(%address, "HTTP challenge and redirect server is ready");
+    }
+    let certificate_config = certificate_config(config);
+    provision_while_http_runs(&certificate_config, &challenges, redirect_task.as_mut()).await?;
+    let tls = RustlsConfig::from_pem_file(&config.cert, &config.key)
+        .await
+        .context("loading TLS certificate and private key")?;
+    Ok(PreparedServers {
+        secure_listener,
+        redirect_handle,
+        redirect_task,
+        challenges,
+        certificate_config,
+        tls,
+    })
+}
+
+async fn start_media(config: &AppConfig) -> Result<Option<ActiveMedia>> {
+    if config.media_mode != MediaMode::Forward {
+        tracing::info!(mode = ?config.media_mode, "live media mode configured");
+        return Ok(None);
+    }
+    let address = resolve_media_address(config).await?;
+    let (forwarder, runtime, events) = media::start(address)?;
+    tracing::info!(%address, "built-in media forwarder is ready on UDP");
+    Ok(Some(ActiveMedia {
+        forwarder,
+        runtime,
+        events,
+    }))
+}
+
+fn attach_media(
+    live: &LiveHub,
+    setup: Option<ActiveMedia>,
+) -> (Option<media::MediaForwarder>, Option<RunningMedia>) {
+    let Some(ActiveMedia {
+        forwarder,
+        runtime,
+        mut events,
+    }) = setup
+    else {
+        return (None, None);
+    };
+    let event_hub = live.clone();
+    let event_task = tokio::spawn(async move {
+        while let Some(ForwardEvent::Disconnected {
+            session_id,
+            role,
+            connection_id,
+        }) = events.recv().await
+        {
+            event_hub
+                .release_forward_peer(&session_id, role, connection_id)
+                .await;
+        }
+    });
+    (
+        Some(forwarder),
+        Some(RunningMedia {
+            runtime,
+            event_task,
+        }),
+    )
+}
+
+impl RunningMedia {
+    async fn shutdown(self) -> Result<()> {
+        self.runtime.shutdown().await;
+        self.event_task.await.context("joining media event task")?;
+        Ok(())
+    }
+}
+
+async fn resolve_media_address(config: &AppConfig) -> Result<SocketAddr> {
+    let ip = if let Some(address) = config.media_address {
+        address
+    } else if config.domain == "localhost" {
+        Ipv4Addr::LOCALHOST.into()
+    } else if let Ok(address) = config.domain.parse() {
+        address
+    } else {
+        let addresses = tokio::net::lookup_host((config.domain.as_str(), config.media_port))
+            .await
+            .with_context(|| format!("resolving media address for {}", config.domain))?
+            .collect::<Vec<_>>();
+        addresses
+            .iter()
+            .find(|address| address.is_ipv4())
+            .or_else(|| addresses.first())
+            .map(SocketAddr::ip)
+            .ok_or_else(|| anyhow!("{} did not resolve to a media address", config.domain))?
+    };
+    Ok(SocketAddr::new(ip, config.media_port))
 }
 
 fn spawn_http_server(

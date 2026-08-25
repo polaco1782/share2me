@@ -4,11 +4,11 @@ version = "1.0.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
-description = "A small self-hosted HTTPS file sharing server"
+description = "A small self-hosted HTTPS file and live-screen sharing server"
 
 [dependencies]
 anyhow = "1.0"
-axum = { version = "0.8.9", features = ["multipart"] }
+axum = { version = "0.8.9", features = ["multipart", "ws"] }
 daemonize = "0.5"
 axum-server = { version = "0.8.0", features = ["tls-rustls"] }
 clap = { version = "4.5", features = ["derive"] }
@@ -30,6 +30,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 sha2 = "0.10"
 socket2 = "0.6"
+str0m = { version = "0.23.1", default-features = false, features = ["rust-crypto"] }
 time = "0.3"
 thiserror = "2.0"
 tokio = { version = "1.53", features = ["full"] }
