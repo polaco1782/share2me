@@ -48,6 +48,14 @@ pub struct AppConfig {
     #[arg(long)]
     pub http_log: bool,
 
+    /// Write application logs to this file in addition to stdout.
+    #[arg(long)]
+    pub log_file: Option<PathBuf>,
+
+    /// Daemonize: detach from the terminal and run in the background.
+    #[arg(long)]
+    pub daemon: bool,
+
     #[arg(long, default_value = "data")]
     pub data_dir: PathBuf,
 }

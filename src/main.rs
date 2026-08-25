@@ -1,5 +1,6 @@
 mod certificates;
 mod config;
+mod daemon;
 mod housekeeper;
 mod page;
 mod routes;
@@ -19,8 +20,9 @@ use hyper_util::{
     server::conn::auto::Builder as HttpBuilder,
 };
 use socket2::{Domain, Protocol, Socket, Type};
+use std::fs::File;
 use tokio::{sync::watch, task::JoinHandle};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, fmt::Layer, prelude::__tracing_subscriber_SubscriberExt, util::SubscriberInitExt};
 
 use crate::{
     certificates::CertificateConfig, config::AppConfig, routes::AppState, store::FileStore,
@@ -30,16 +32,31 @@ type ServerTask = JoinHandle<io::Result<()>>;
 
 #[tokio::main]
 async fn main() {
-    init_logging();
-    if let Err(error) = run().await {
+    let config = match AppConfig::from_args() {
+        Ok(config) => config,
+        Err(error) => {
+            eprintln!("Error: {error}");
+            std::process::exit(1);
+        }
+    };
+
+    if config.daemon {
+        if let Err(error) = daemon::daemonize() {
+            eprintln!("Failed to daemonize: {error}");
+            std::process::exit(1);
+        }
+    }
+
+    init_logging(config.log_file.as_deref());
+
+    if let Err(error) = run(config).await {
         tracing::error!(error = %format!("{error:#}"), "Share2Me failed");
         std::process::exit(1);
     }
 }
 
-async fn run() -> Result<()> {
+async fn run(config: AppConfig) -> Result<()> {
     sandbox::apply_resource_limits()?;
-    let config = AppConfig::from_args()?;
     let mut store = FileStore::new(config.data_dir.clone()).context("initializing data storage")?;
     let jail_user = sandbox::resolve_user(config.drop_user.as_deref())?;
     sandbox::require_root(config.sandbox, jail_user.as_ref())?;
@@ -260,14 +277,30 @@ fn configure_http(builder: &mut HttpBuilder<TokioExecutor>) {
         .max_pending_accept_reset_streams(Some(32));
 }
 
-fn init_logging() {
+fn init_logging(log_file: Option<&std::path::Path>) {
     let filter = EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| EnvFilter::new("share2me=info,instant_acme=warn,axum_server=warn"));
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .with_target(false)
-        .compact()
-        .init();
+    let subscriber = tracing_subscriber::registry().with(filter);
+
+    let subscriber = subscriber.with(
+        Layer::default()
+            .with_ansi(true)
+            .with_target(false)
+            .compact(),
+    );
+
+    if let Some(path) = log_file {
+        let file = File::create(path)
+            .unwrap_or_else(|e| panic!("failed to open log file '{}': {e}", path.display()));
+        let file_layer = Layer::default()
+            .with_writer(file)
+            .with_ansi(false)
+            .with_target(false)
+            .compact();
+        subscriber.with(file_layer).init();
+    } else {
+        subscriber.init();
+    }
 }
 
 #[cfg(test)]
