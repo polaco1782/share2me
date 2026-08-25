@@ -25,7 +25,8 @@ use tokio::sync::{mpsc as tokio_mpsc, oneshot};
 
 const COMMAND_QUEUE: usize = 64;
 const MAX_FORWARD_CLIENTS: usize = 256;
-const MAX_TRACKS_PER_PUBLISHER: usize = 2;
+const MAX_VIDEO_TRACKS_PER_PUBLISHER: usize = 1;
+const MAX_AUDIO_TRACKS_PER_PUBLISHER: usize = 2;
 const IO_BUFFER_BYTES: usize = 2048;
 const COMMAND_POLL_INTERVAL: Duration = Duration::from_millis(50);
 const CLIENT_CLOSE_DELAY: Duration = Duration::from_millis(250);
@@ -409,10 +410,17 @@ fn propagate(
             origin,
             track,
         } => {
+            let target_role = clients
+                .iter()
+                .find(|client| client.id == origin)
+                .map(|client| match client.role {
+                    MediaRole::Publisher => MediaRole::Viewer,
+                    MediaRole::Viewer => MediaRole::Publisher,
+                });
             for client in clients.iter_mut().filter(|client| {
                 client.session_id == session_id
                     && client.id != origin
-                    && client.role == MediaRole::Viewer
+                    && Some(client.role) == target_role
             }) {
                 client.handle_track_open(track.clone());
             }
@@ -422,10 +430,17 @@ fn propagate(
             origin,
             data,
         } => {
+            let target_role = clients
+                .iter()
+                .find(|client| client.id == origin)
+                .map(|client| match client.role {
+                    MediaRole::Publisher => MediaRole::Viewer,
+                    MediaRole::Viewer => MediaRole::Publisher,
+                });
             for client in clients.iter_mut().filter(|client| {
                 client.session_id == session_id
                     && client.id != origin
-                    && client.role == MediaRole::Viewer
+                    && Some(client.role) == target_role
             }) {
                 client.handle_media_data_out(origin, &data);
             }
@@ -635,10 +650,7 @@ impl Client {
                     Propagated::Noop
                 }
                 Event::MediaAdded(media) => {
-                    if self.role != MediaRole::Publisher
-                        || !media.direction.is_receiving()
-                        || self.tracks_in.len() >= MAX_TRACKS_PER_PUBLISHER
-                    {
+                    if !media.direction.is_receiving() || !self.accepts_track(media.kind) {
                         self.rtc.disconnect();
                         Propagated::Noop
                     } else {
@@ -675,12 +687,29 @@ impl Client {
         }
     }
 
+    fn accepts_track(&self, kind: MediaKind) -> bool {
+        match self.role {
+            MediaRole::Publisher => {
+                let limit = match kind {
+                    MediaKind::Video => MAX_VIDEO_TRACKS_PER_PUBLISHER,
+                    MediaKind::Audio => MAX_AUDIO_TRACKS_PER_PUBLISHER,
+                };
+                self.tracks_in
+                    .iter()
+                    .filter(|track| track.id.kind == kind)
+                    .count()
+                    < limit
+            }
+            MediaRole::Viewer => kind == MediaKind::Audio && self.tracks_in.is_empty(),
+        }
+    }
+
     fn handle_media_data_in(&mut self, data: MediaData) -> Propagated {
-        if self.role != MediaRole::Publisher {
+        let Some(track) = self.tracks_in.iter().find(|track| track.id.mid == data.mid) else {
             self.rtc.disconnect();
             return Propagated::Noop;
-        }
-        if !data.contiguous {
+        };
+        if !data.contiguous && track.id.kind == MediaKind::Video {
             self.request_keyframe_throttled(data.mid, data.rid, KeyframeRequestKind::Fir);
         }
         Propagated::MediaData {
@@ -730,7 +759,7 @@ impl Client {
     }
 
     fn negotiate_if_needed(&mut self) -> bool {
-        if self.role != MediaRole::Viewer || self.channel_id.is_none() || self.pending.is_some() {
+        if self.channel_id.is_none() || self.pending.is_some() {
             return false;
         }
         for track in &mut self.tracks_out {
@@ -959,6 +988,17 @@ mod tests {
         changes.apply().unwrap().0
     }
 
+    fn client(role: MediaRole, crypto: &Arc<CryptoProvider>) -> Client {
+        Client::new(
+            "session".to_owned(),
+            role,
+            rand::random(),
+            Rtc::builder()
+                .set_crypto_provider(crypto.clone())
+                .build(Instant::now()),
+        )
+    }
+
     #[test]
     fn accepts_one_publisher_and_requires_it_before_viewers() {
         let crypto = Arc::new(str0m::crypto::from_feature_flags());
@@ -1012,5 +1052,52 @@ mod tests {
             ),
             Err(ForwardJoinError::Unavailable)
         ));
+    }
+
+    #[test]
+    fn routes_viewer_microphones_only_to_the_publisher() {
+        let crypto = Arc::new(str0m::crypto::from_feature_flags());
+        let publisher = client(MediaRole::Publisher, &crypto);
+        let viewer_one = client(MediaRole::Viewer, &crypto);
+        let viewer_two = client(MediaRole::Viewer, &crypto);
+        let viewer_id = viewer_one.id;
+        let microphone = Arc::new(TrackIn {
+            origin: viewer_id,
+            mid: "mic".into(),
+            kind: MediaKind::Audio,
+        });
+        let mut clients = vec![publisher, viewer_one, viewer_two];
+        let (events, _receiver) = tokio_mpsc::unbounded_channel();
+        propagate(
+            Propagated::TrackOpen {
+                session_id: "session".to_owned(),
+                origin: viewer_id,
+                track: Arc::downgrade(&microphone),
+            },
+            &mut clients,
+            &events,
+        );
+        assert_eq!(clients[0].tracks_out.len(), 1);
+        assert!(clients[1].tracks_out.is_empty());
+        assert!(clients[2].tracks_out.is_empty());
+
+        let publisher_id = clients[0].id;
+        let host_microphone = Arc::new(TrackIn {
+            origin: publisher_id,
+            mid: "host-mic".into(),
+            kind: MediaKind::Audio,
+        });
+        propagate(
+            Propagated::TrackOpen {
+                session_id: "session".to_owned(),
+                origin: publisher_id,
+                track: Arc::downgrade(&host_microphone),
+            },
+            &mut clients,
+            &events,
+        );
+        assert_eq!(clients[0].tracks_out.len(), 1);
+        assert_eq!(clients[1].tracks_out.len(), 1);
+        assert_eq!(clients[2].tracks_out.len(), 1);
     }
 }

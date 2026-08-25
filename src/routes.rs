@@ -194,7 +194,7 @@ async fn request_policy(
     headers.insert(
         "permissions-policy",
         HeaderValue::from_static(
-            "camera=(), microphone=(), geolocation=(), display-capture=(self)",
+            "camera=(), microphone=(self), geolocation=(), display-capture=(self)",
         ),
     );
     if policy.hsts {
@@ -1128,6 +1128,12 @@ mod tests {
             .oneshot(Request::builder().uri("/").body(Body::empty()).unwrap())
             .await
             .unwrap();
+        assert_eq!(
+            home.headers()
+                .get("permissions-policy")
+                .and_then(|value| value.to_str().ok()),
+            Some("camera=(), microphone=(self), geolocation=(), display-capture=(self)")
+        );
         let body = to_bytes(home.into_body(), 256 * 1024).await.unwrap();
         assert!(!String::from_utf8_lossy(&body).contains("href=\"/share\""));
         let share = app

@@ -15,7 +15,7 @@ Rust is not a substitute for security controls, so the port also validates untru
 ## Features
 
 - Browser and command-line uploads, up to 512 MiB per file.
-- Low-latency browser screen sharing with available system audio over WebRTC.
+- Low-latency browser screen sharing with available system audio and two-way microphones over WebRTC.
 - Built-in media forwarding by default, with optional direct STUN or relay-only TURN modes.
 - Random viewer links, separate host credentials, and up to eight viewers.
 - Random, non-enumerable share links.
@@ -168,7 +168,9 @@ Open `/share`, choose **Start sharing**, and select a screen, window, or browser
 
 The browser requests screen audio, but the available sources depend on the browser, operating system, and selected surface. For example, a browser may offer audio for a tab but not for an arbitrary window. Capture requires HTTPS (or the browser's trusted localhost exception), an explicit user action, and fresh permission for every share.
 
-`--media-mode forward` is the default. The built-in SFU receives one encrypted WebRTC connection from the sharer, decrypts the media in process, and re-encrypts a separate WebRTC connection for every viewer. Nothing is recorded, and the sharer uploads only one stream, but the server needs outbound bandwidth for every viewer. Forwarded media is encrypted on each network hop; it is not end-to-end encrypted between the browsers.
+The sharer can include and mute their microphone independently from screen audio. Viewers connect automatically with their microphones off and can explicitly choose **Enable microphone**, then mute or unmute afterward. The sharer's microphone is sent to every viewer; each viewer's microphone is sent only to the sharer, never to other viewers. Microphone capture uses echo cancellation, noise suppression, and automatic gain control when the browser supports them.
+
+`--media-mode forward` is the default. The built-in SFU receives one encrypted WebRTC connection from the sharer, decrypts the media in process, and re-encrypts a separate WebRTC connection for every viewer. It also routes each viewer's microphone back to the sharer without broadcasting it to other viewers. Nothing is recorded, and the sharer uploads only one copy of each track, but the server needs outbound bandwidth for every viewer. Forwarded media is encrypted on each network hop; it is not end-to-end encrypted between the browsers.
 
 Forwarding needs no external STUN or TURN service. UDP port `7882` must be reachable from browsers by default. Share2Me resolves `--domain` and advertises that address; behind NAT, a load balancer, or split DNS, pass the public address explicitly and forward the UDP port to this process:
 
