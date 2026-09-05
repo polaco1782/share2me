@@ -36,10 +36,10 @@ use tower_http::{
 use crate::{
     certificates::Challenges,
     config::{MediaMode, RtcIceServer},
-    live::{LiveHub, MAX_SDP_BYTES, MAX_SIGNAL_BYTES, PeerRole},
-    media::{ForwardJoinError, MediaForwarder, MediaRole},
+    live::{LiveHub, MAX_SDP_BYTES, MAX_SIGNAL_BYTES, normalize_username, valid_room_name},
+    media::{ForwardJoinError, MediaForwarder},
     page::{
-        ViewerKind, decrypt_page_html, index_html, share_page_html, viewer_html, watch_page_html,
+        ViewerKind, decrypt_page_html, index_html, room_lobby_html, room_page_html, viewer_html,
     },
     store::{FileStore, MAX_UPLOAD_BYTES, StorageError, is_safe_filename, is_valid_token},
 };
@@ -90,9 +90,9 @@ impl AppState {
     }
 }
 
-#[derive(Clone, Copy, Debug, serde::Deserialize)]
-struct SignalQuery {
-    role: PeerRole,
+#[derive(Clone, Debug, serde::Deserialize)]
+struct RoomQuery {
+    username: String,
 }
 
 #[derive(Clone, Debug)]
@@ -128,16 +128,16 @@ pub fn https_router(state: AppState, log_requests: bool, domain: &str) -> Router
         .fallback(not_found);
     let router = if media_mode.enabled() {
         let router = router
-            .route("/share", get(share_page))
-            .route("/watch/{token}", get(watch_page))
-            .route("/api/live", post(create_live_share));
-        if media_mode.is_direct() {
-            router.route("/api/live/{token}/signal", any(live_signal))
-        } else {
+            .route("/share", get(room_lobby_page))
+            .route("/room/{name}", get(room_page))
+            .route("/api/rooms/{name}/signal", any(room_signal));
+        if media_mode == MediaMode::Forward {
             router.route(
-                "/api/live/{token}/forward",
-                post(forward_signal).delete(stop_forward_share),
+                "/api/rooms/{name}/forward",
+                post(forward_signal).delete(stop_forward_stream),
             )
+        } else {
+            router
         }
     } else {
         router
@@ -213,83 +213,66 @@ async fn index(State(state): State<AppState>) -> Response {
     html_response(index_html(state.media_mode.enabled()))
 }
 
-async fn share_page(State(state): State<AppState>) -> Response {
-    html_response(share_page_html(state.media_mode, &state.ice_servers))
+async fn room_lobby_page() -> Response {
+    html_response(room_lobby_html())
 }
 
-async fn watch_page(State(state): State<AppState>, Path(token): Path<String>) -> Response {
-    if !is_valid_token(&token) || !state.live.contains(&token).await {
+async fn room_page(State(state): State<AppState>, Path(name): Path<String>) -> Response {
+    if !valid_room_name(&name) {
         return not_found().await;
     }
-    html_response(watch_page_html(
-        &token,
-        state.media_mode,
-        &state.ice_servers,
-    ))
+    html_response(room_page_html(&name, state.media_mode, &state.ice_servers))
 }
 
-async fn create_live_share(State(state): State<AppState>, request: Request) -> Response {
-    if !browser_origin_allowed(request.headers(), &state.base_url) {
-        return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
-    }
-    let Some(session) = state.live.create_session().await else {
-        return json_response(
-            StatusCode::SERVICE_UNAVAILABLE,
-            json!({"ok":false,"error":"Live sharing capacity is full"}),
-        );
-    };
-    let watch_url = format!("{}/watch/{}", state.base_url, session.id);
-    tracing::info!(session = %session.id, "live screen share created");
-    json_response(
-        StatusCode::CREATED,
-        json!({
-            "ok": true,
-            "id": session.id,
-            "host_key": session.host_key,
-            "watch_url": watch_url,
-            "mode": state.media_mode,
-        }),
-    )
-}
-
-async fn live_signal(
+async fn room_signal(
     State(state): State<AppState>,
-    Path(token): Path<String>,
-    Query(query): Query<SignalQuery>,
+    Path(name): Path<String>,
+    Query(query): Query<RoomQuery>,
     headers: HeaderMap,
     upgrade: WebSocketUpgrade,
 ) -> Response {
-    if !state.media_mode.is_direct() {
-        return not_found().await;
-    }
     if !browser_origin_allowed(&headers, &state.base_url) {
         return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
     }
-    if !is_valid_token(&token) || !state.live.contains(&token).await {
+    let Some(username) = normalize_username(&query.username) else {
+        return body_response(StatusCode::BAD_REQUEST, "text/plain", "Invalid username\n");
+    };
+    if !valid_room_name(&name) {
         return not_found().await;
     }
     upgrade
         .max_message_size(MAX_SIGNAL_BYTES)
         .max_frame_size(MAX_SIGNAL_BYTES)
-        .on_upgrade(move |socket| state.live.handle_socket(socket, token, query.role))
+        .on_upgrade(move |socket| async move {
+            let departure = state
+                .live
+                .clone()
+                .handle_socket(socket, name.clone(), username)
+                .await;
+            if let Some(forwarder) = state.forwarder {
+                if departure.host_left {
+                    let _ = forwarder.stop(name).await;
+                } else if let Some(connection_id) = departure.forward_viewer {
+                    let _ = forwarder.disconnect_viewer(name, connection_id).await;
+                }
+            }
+        })
 }
 
 async fn forward_signal(
     State(state): State<AppState>,
-    Path(token): Path<String>,
-    Query(query): Query<SignalQuery>,
+    Path(name): Path<String>,
     request: Request,
 ) -> Response {
     if state.media_mode != MediaMode::Forward
         || !browser_origin_allowed(request.headers(), &state.base_url)
-        || !is_valid_token(&token)
-        || !state.live.contains(&token).await
+        || !valid_room_name(&name)
     {
         return not_found().await;
     }
-    let host_key = request
+    let peer_key = request
         .headers()
-        .get("x-share2me-host-key")
+        .get("x-share2me-peer-key")
         .and_then(|value| value.to_str().ok())
         .filter(|value| value.len() == 64)
         .map(str::to_owned);
@@ -306,34 +289,20 @@ async fn forward_signal(
         );
     };
     let connection_id = rand::random::<u128>();
-    let role = match query.role {
-        PeerRole::Host => {
-            let Some(host_key) = host_key else {
-                return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
-            };
-            if !state
-                .live
-                .claim_forward_host(&token, &host_key, connection_id)
-                .await
-            {
-                return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
-            }
-            MediaRole::Publisher
-        }
-        PeerRole::Viewer => {
-            if !state.live.claim_forward_viewer(&token, connection_id).await {
-                return json_response(
-                    StatusCode::CONFLICT,
-                    json!({"ok":false,"error":"This live share is unavailable or full"}),
-                );
-            }
-            MediaRole::Viewer
-        }
+    let Some(peer_key) = peer_key else {
+        return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
+    };
+    let Some(role) = state
+        .live
+        .claim_forward_peer(&name, &peer_key, connection_id)
+        .await
+    else {
+        return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
     };
     let Some(forwarder) = &state.forwarder else {
         state
             .live
-            .release_forward_peer(&token, role, connection_id)
+            .release_forward_peer(&name, role, connection_id)
             .await;
         return json_response(
             StatusCode::SERVICE_UNAVAILABLE,
@@ -341,44 +310,44 @@ async fn forward_signal(
         );
     };
     match forwarder
-        .join(token.clone(), role, connection_id, offer)
+        .join(name.clone(), role, connection_id, offer)
         .await
     {
         Ok(answer) => json_response(StatusCode::OK, json!(answer)),
         Err(error) => {
             state
                 .live
-                .release_forward_peer(&token, role, connection_id)
+                .release_forward_peer(&name, role, connection_id)
                 .await;
             forward_error_response(&error)
         }
     }
 }
 
-async fn stop_forward_share(
+async fn stop_forward_stream(
     State(state): State<AppState>,
-    Path(token): Path<String>,
+    Path(name): Path<String>,
     request: Request,
 ) -> Response {
     if state.media_mode != MediaMode::Forward
         || !browser_origin_allowed(request.headers(), &state.base_url)
-        || !is_valid_token(&token)
+        || !valid_room_name(&name)
     {
         return not_found().await;
     }
-    let Some(host_key) = request
+    let Some(peer_key) = request
         .headers()
-        .get("x-share2me-host-key")
+        .get("x-share2me-peer-key")
         .and_then(|value| value.to_str().ok())
         .filter(|value| value.len() == 64)
     else {
         return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
     };
-    if !state.live.stop_forward_session(&token, host_key).await {
+    if !state.live.stop_forward_stream(&name, peer_key).await {
         return body_response(StatusCode::FORBIDDEN, "text/plain", "Forbidden\n");
     }
     if let Some(forwarder) = &state.forwarder
-        && let Err(error) = forwarder.stop(token).await
+        && let Err(error) = forwarder.stop(name).await
     {
         return forward_error_response(&error);
     }
@@ -1043,7 +1012,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_share_creation_returns_separate_host_and_viewer_secrets() {
+    async fn named_room_pages_are_reusable_and_validate_names() {
         let directory = tempdir().unwrap();
         let store = FileStore::new(directory.path().to_path_buf()).unwrap();
         let app = https_router(
@@ -1058,53 +1027,44 @@ mod tests {
             false,
             "localhost",
         );
-        let rejected = app
+        let room = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri("/api/live")
+                    .uri("/room/weekly-demo")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(rejected.status(), StatusCode::FORBIDDEN);
+        assert_eq!(room.status(), StatusCode::OK);
+        let body = to_bytes(room.into_body(), 256 * 1024).await.unwrap();
+        let body = String::from_utf8_lossy(&body);
+        assert!(body.contains("const ROOM=\"weekly-demo\""));
+        assert!(body.contains("Join this room"));
+        assert!(body.contains("data-reaction=\"👍\""));
 
-        let created = app
+        let same_room = app
             .clone()
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri("/api/live")
-                    .header("origin", "https://localhost:8443")
+                    .uri("/room/weekly-demo")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(created.status(), StatusCode::CREATED);
-        let payload: serde_json::Value =
-            serde_json::from_slice(&to_bytes(created.into_body(), 4096).await.unwrap()).unwrap();
-        let id = payload["id"].as_str().unwrap();
-        let host_key = payload["host_key"].as_str().unwrap();
-        let watch_url = payload["watch_url"].as_str().unwrap();
-        assert!(is_valid_token(id));
-        assert_eq!(host_key.len(), 64);
-        assert!(!watch_url.contains(host_key));
-
-        let watch = app
+        assert_eq!(same_room.status(), StatusCode::OK);
+        let invalid = app
             .oneshot(
                 Request::builder()
-                    .uri(format!("/watch/{id}"))
+                    .uri("/room/Invalid_Room")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(watch.status(), StatusCode::OK);
-        let body = to_bytes(watch.into_body(), 256 * 1024).await.unwrap();
-        assert!(String::from_utf8_lossy(&body).contains("RTCPeerConnection"));
+        assert_eq!(invalid.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
@@ -1147,31 +1107,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(share.status(), StatusCode::NOT_FOUND);
-        let create = app
+        let room = app
             .oneshot(
                 Request::builder()
-                    .method("POST")
-                    .uri("/api/live")
-                    .header("origin", "https://localhost:8443")
+                    .uri("/room/weekly-demo")
                     .body(Body::empty())
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(create.status(), StatusCode::NOT_FOUND);
+        assert_eq!(room.status(), StatusCode::NOT_FOUND);
     }
 
     #[tokio::test]
-    async fn forwarding_route_validates_and_authenticates_publisher_offers() {
+    async fn forwarding_route_requires_a_registered_room_peer() {
         let directory = tempdir().unwrap();
         let store = FileStore::new(directory.path().to_path_buf()).unwrap();
-        let live = LiveHub::default();
-        let session = live.create_session().await.unwrap();
         let app = https_router(
             AppState::new(
                 store,
                 "https://localhost:8443".to_owned(),
-                live,
+                LiveHub::default(),
                 MediaMode::Forward,
                 Vec::new(),
                 None,
@@ -1192,35 +1148,35 @@ mod tests {
             None,
             None,
         );
-        let offer = changes.apply().unwrap().0;
+        let offer = serde_json::to_vec(&changes.apply().unwrap().0).unwrap();
         let response = app
             .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/live/{}/forward?role=host", session.id))
+                    .uri("/api/rooms/weekly-demo/forward")
                     .header("origin", "https://localhost:8443")
                     .header("content-type", "application/json")
-                    .header("x-share2me-host-key", &session.host_key)
-                    .body(Body::from(serde_json::to_vec(&offer).unwrap()))
+                    .header("x-share2me-peer-key", "0".repeat(64))
+                    .body(Body::from(offer.clone()))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         let missing = app
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/api/live/{}/forward?role=host", session.id))
+                    .uri("/api/rooms/weekly-demo/forward")
                     .header("origin", "https://localhost:8443")
                     .header("content-type", "application/json")
-                    .body(Body::from(serde_json::to_vec(&offer).unwrap()))
+                    .body(Body::from(offer))
                     .unwrap(),
             )
             .await
             .unwrap();
-        assert_eq!(missing.status(), StatusCode::NOT_FOUND);
+        assert_eq!(missing.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

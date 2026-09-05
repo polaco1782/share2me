@@ -28,10 +28,6 @@ impl MediaMode {
     pub const fn enabled(self) -> bool {
         !matches!(self, Self::Disabled)
     }
-
-    pub const fn is_direct(self) -> bool {
-        matches!(self, Self::Stun | Self::Turn)
-    }
 }
 
 #[allow(clippy::struct_excessive_bools)]

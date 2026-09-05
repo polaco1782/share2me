@@ -81,6 +81,11 @@ enum Command {
         session_id: String,
         response: oneshot::Sender<()>,
     },
+    DisconnectViewer {
+        session_id: String,
+        connection_id: u128,
+        response: oneshot::Sender<()>,
+    },
     Shutdown,
 }
 
@@ -159,6 +164,28 @@ impl MediaForwarder {
         self.commands
             .try_send(Command::Stop {
                 session_id,
+                response: response_tx,
+            })
+            .map_err(|error| match error {
+                TrySendError::Full(_) => ForwardJoinError::Busy,
+                TrySendError::Disconnected(_) => ForwardJoinError::Unavailable,
+            })?;
+        tokio::time::timeout(Duration::from_secs(5), response_rx)
+            .await
+            .map_err(|_| ForwardJoinError::Timeout)?
+            .map_err(|_| ForwardJoinError::Unavailable)
+    }
+
+    pub async fn disconnect_viewer(
+        &self,
+        session_id: String,
+        connection_id: u128,
+    ) -> Result<(), ForwardJoinError> {
+        let (response_tx, response_rx) = oneshot::channel();
+        self.commands
+            .try_send(Command::DisconnectViewer {
+                session_id,
+                connection_id,
                 response: response_tx,
             })
             .map_err(|error| match error {
@@ -294,6 +321,20 @@ fn drain_commands(
                     .map(|client| (client.id, client.connection_id))
                 {
                     end_session(&session_id, publisher, connection_id, clients, events);
+                }
+                let _ = response.send(());
+            }
+            Ok(Command::DisconnectViewer {
+                session_id,
+                connection_id,
+                response,
+            }) => {
+                if let Some(viewer) = clients.iter_mut().find(|client| {
+                    client.session_id == session_id
+                        && client.role == MediaRole::Viewer
+                        && client.connection_id == connection_id
+                }) {
+                    viewer.rtc.disconnect();
                 }
                 let _ = response.send(());
             }

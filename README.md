@@ -17,7 +17,7 @@ Rust is not a substitute for security controls, so the port also validates untru
 - Browser and command-line uploads, up to 512 MiB per file.
 - Low-latency browser screen sharing with available system audio and two-way microphones over WebRTC.
 - Built-in media forwarding by default, with optional direct STUN or relay-only TURN modes.
-- Random viewer links, separate host credentials, and up to eight viewers.
+- Reusable named rooms with first-joiner sharing, participant presence, and live reactions.
 - Random, non-enumerable share links.
 - Single-download links that remove their content when claimed.
 - Expiring links with automatic background cleanup.
@@ -148,27 +148,30 @@ Then open `https://localhost:8443`. A new self-signed certificate causes an expe
 |---|---|
 | `GET /` | Browser upload UI |
 | `GET /healthz` | Returns `200 OK` |
-| `GET /share` | Start a live screen-and-audio share when media is enabled |
-| `GET /watch/<token>` | Watch an active live share when media is enabled |
-| `POST /api/live` | Create an in-memory live session when media is enabled |
-| `POST /api/live/<token>/forward?role=...` | Exchange an SDP offer in `forward` mode |
-| `DELETE /api/live/<token>/forward` | Authenticated publisher stop in `forward` mode |
-| `GET /api/live/<token>/signal?role=...` | WebSocket signaling in `stun` or `turn` mode |
+| `GET /share` | Choose and open a named screen-sharing room |
+| `GET /room/<name>` | Join a reusable named room as its sharer or a viewer |
+| `GET /api/rooms/<name>/signal?username=...` | WebSocket role assignment, presence, reactions, and direct signaling |
+| `POST /api/rooms/<name>/forward` | Exchange an authenticated SDP offer in `forward` mode |
+| `DELETE /api/rooms/<name>/forward` | Stop the current forwarded stream without deleting the room link |
 | `POST /upload` | Multipart browser upload |
 | `PUT /<filename>` | Raw command-line upload |
 | `GET /<token>` | Download a stored file |
 | `GET /v/<token>` | Safe text or image viewer |
 | `GET /d/<token>` | Browser-side E2EE download page |
 
-Unknown and malformed tokens return the same `404 Not Found` response.
+Unknown and malformed file tokens return the same `404 Not Found` response. Room names contain up to 48 lowercase letters, numbers, and hyphens, and must start and end with a letter or number.
 
 ## Live screen sharing
 
-Open `/share`, choose **Start sharing**, and select a screen, window, or browser tab. Share2Me creates a random 128-bit viewer link. A separate 256-bit host credential authorizes the sharing page and is never included in the viewer URL. The session exists only in memory and the link stops working when the sharer disconnects. Every mode caps a session at eight viewers.
+Open `/share`, choose a room name, and send the resulting `/room/<name>` URL to the other participants. Room URLs are reusable: the first person to join an empty room is assigned the sharer role, and the next eight participants are viewers. Each person chooses a username, and the room sidebar shows the current sharer and viewers. If the sharer disconnects, connected viewers automatically rejoin; the first one back becomes the new sharer.
+
+Named URLs are intentionally easier to remember but are also easier to guess than random bearer links. Anyone who knows a room name can join it, and anyone who reaches an empty room first becomes its sharer. Active participant and media state remains in memory, but the same named URL can be used again after the room empties or the server restarts.
 
 The browser requests screen audio, but the available sources depend on the browser, operating system, and selected surface. For example, a browser may offer audio for a tab but not for an arbitrary window. Capture requires HTTPS (or the browser's trusted localhost exception), an explicit user action, and fresh permission for every share.
 
-The sharer can include and mute their microphone independently from screen audio. Viewers connect automatically with their microphones off and can explicitly choose **Enable microphone**, then mute or unmute afterward. The sharer's microphone is sent to every viewer; each viewer's microphone is sent only to the sharer, never to other viewers. Microphone capture uses echo cancellation, noise suppression, and automatic gain control when the browser supports them.
+The sharer can include and mute their microphone independently from screen audio. Viewers connect automatically with their microphones off and can explicitly choose **Enable microphone**, then mute or unmute afterward. Mute detaches the microphone from its WebRTC senders instead of relying only on a disabled capture track. The sharer's microphone is sent to every viewer; each viewer's microphone is sent only to the sharer, never to other viewers. While a viewer microphone is active, Share2Me temporarily pauses the sharer's screen-audio sender so the voice playing on the sharer's machine cannot be captured and rebroadcast to every viewer. Screen audio resumes when all viewers mute or disconnect. Microphone capture uses echo cancellation, noise suppression, and automatic gain control when the browser supports them.
+
+Viewers can send one of the built-in reactions from beneath the video. Reactions are allow-listed and rate-limited by the server, then displayed as a short floating animation for everyone in the room together with the viewer's username.
 
 `--media-mode forward` is the default. The built-in SFU receives one encrypted WebRTC connection from the sharer, decrypts the media in process, and re-encrypts a separate WebRTC connection for every viewer. It also routes each viewer's microphone back to the sharer without broadcasting it to other viewers. Nothing is recorded, and the sharer uploads only one copy of each track, but the server needs outbound bandwidth for every viewer. Forwarded media is encrypted on each network hop; it is not end-to-end encrypted between the browsers.
 
