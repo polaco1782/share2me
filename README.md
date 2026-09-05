@@ -2,7 +2,7 @@
 
 ![Share2Me web UI](screenshot.png)
 
-Share2Me is a small self-hosted file and live-screen sharing server. It serves a browser UI and a curl-friendly file API over HTTPS, with no accounts or public listing.
+Share2Me is a small self-hosted file and live video-sharing server. It serves a browser UI and a curl-friendly file API over HTTPS, with no accounts or public listing.
 
 The server is implemented in safe Rust. The crate forbids application `unsafe` code, bounds every request body, streams uploads and downloads, and uses Rustls for TLS.
 
@@ -15,7 +15,7 @@ Rust is not a substitute for security controls, so the port also validates untru
 ## Features
 
 - Browser and command-line uploads, up to 512 MiB per file.
-- Low-latency browser screen sharing with available system audio and two-way microphones over WebRTC.
+- Low-latency live video sharing from the sharer's browser, typically a screen, window, or tab capture, with available system audio and two-way microphones over WebRTC.
 - Built-in media forwarding by default, with optional direct STUN or relay-only TURN modes.
 - Reusable named rooms with first-joiner sharing, participant presence, and live reactions.
 - Random, non-enumerable share links.
@@ -161,9 +161,11 @@ Then open `https://localhost:8443`. A new self-signed certificate causes an expe
 
 Unknown and malformed file tokens return the same `404 Not Found` response. Room names contain up to 48 lowercase letters, numbers, and hyphens, and must start and end with a letter or number.
 
-## Live screen sharing
+## Live video sharing
 
 Open `/share`, choose a room name, and send the resulting `/room/<name>` URL to the other participants. Room URLs are reusable: the first person to join an empty room is assigned the sharer role, and the next eight participants are viewers. Each person chooses a username, and the room sidebar shows the current sharer and viewers. If the sharer disconnects, connected viewers automatically rejoin; the first one back becomes the new sharer.
+
+This is a live video-sharing feature, not just a static screen-capture helper. The sharer chooses a browser capture source such as a tab, window, or screen, and Share2Me streams that WebRTC video track to the room. Video playback happens in the browser's built-in `<video>` element, while optional system audio and microphone streams travel over the same room connection.
 
 Named URLs are intentionally easier to remember but are also easier to guess than random bearer links. Anyone who knows a room name can join it, and anyone who reaches an empty room first becomes its sharer. Active participant and media state remains in memory, but the same named URL can be used again after the room empties or the server restarts.
 
